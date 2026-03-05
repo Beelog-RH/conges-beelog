@@ -839,10 +839,12 @@ function NouvelleDemande({ user, onSubmit, feriesAll }) {
         <div className="form-group"><label>Durée (jours ouvrés hors fériés)</label><input readOnly value={jours>0?`${jours} jour(s)`:"—"} /></div>
         <div className="form-group full"><label>Motif</label><textarea value={form.motif} onChange={e=>setForm({...form,motif:e.target.value})} placeholder="Optionnel…" /></div>
       </div>
-      {jours>0&&<div className={`info-box ${soldeApres>=0?"info-ok":"info-warn"}`} style={{marginTop:12}}>
-        {soldeApres>=0?`✅ Solde après demande : ${soldeApres} j`:`⚠ Solde insuffisant — il manque ${Math.abs(soldeApres)} j`}
+      {jours>0&&<div className={`info-box ${soldeApres>=0?"info-ok":"info-yellow"}`} style={{marginTop:12}}>
+        {soldeApres>=0
+          ? `✅ Solde après demande : ${soldeApres} j`
+          : `⚠ Solde insuffisant de ${Math.abs(soldeApres)} j — votre manager pourra accepter ou refuser cette demande en anticipation de la prochaine période.`}
       </div>}
-      <div className="form-actions"><button className="btn btn-primary" onClick={submit} disabled={jours<=0||soldeApres<0}>Envoyer →</button></div>
+      <div className="form-actions"><button className="btn btn-primary" onClick={submit} disabled={jours<=0}>Envoyer →</button></div>
     </div></div>
   </>;
 }
@@ -919,7 +921,7 @@ function Validation({ demandes, users, onValider, onRefuser, onAnnuler, onSaisir
   const submitSaisie = () => {
     if (!form.salarieId) return setFormErr("Veuillez choisir un salarié.");
     if (!form.debut||!form.fin||jours<=0) return setFormErr("Dates invalides.");
-    if (soldeApres < 0) return setFormErr(`Solde insuffisant — il manque ${Math.abs(soldeApres)} jour(s).`);
+    if (soldeApres < 0) setFormErr(`⚠ Solde insuffisant de ${Math.abs(soldeApres)} jour(s) — la demande sera créée en anticipation de la prochaine période.`);
     onSaisirPourSalarie({
       salarieId: parseInt(form.salarieId),
       salarie: salChoisi.nom,
@@ -944,18 +946,28 @@ function Validation({ demandes, users, onValider, onRefuser, onAnnuler, onSaisir
       {tab==="attente"&&(enAttente.length===0
         ? <div className="card"><div className="empty-state"><div className="empty-icon">🎉</div><p>Tout est traité !</p></div></div>
         : <div className="table-wrap"><table>
-            <thead><tr><th>Salarié</th><th>Type</th><th>Période</th><th>Durée</th><th>Motif</th><th>Actions</th></tr></thead>
-            <tbody>{enAttente.map(d=>(
-              <tr key={d.id}>
+            <thead><tr><th>Salarié</th><th>Type</th><th>Période</th><th>Durée</th><th>Solde actuel</th><th>Motif</th><th>Actions</th></tr></thead>
+            <tbody>{enAttente.map(d=>{
+              const sal = users.find(u=>u.id===d.salarieId);
+              const soldeActuel = sal ? (d.type==="RTT" ? sal.soldeRTT : sal.solde) : null;
+              const soldeApresD = soldeActuel !== null ? soldeActuel - d.jours : null;
+              return (
+              <tr key={d.id} style={soldeApresD!==null&&soldeApresD<0?{background:"#fff8f0"}:{}}>
                 <td><strong>{d.salarie}</strong></td><td>{d.type}</td>
                 <td style={{whiteSpace:"nowrap"}}>{d.debut} → {d.fin}</td><td>{d.jours}j</td>
+                <td>
+                  {soldeActuel!==null&&<>
+                    <span style={{fontWeight:600,color:soldeApresD<0?"#c84b31":"#2d6a4f"}}>{soldeActuel}j</span>
+                    {soldeApresD<0&&<span className="badge" style={{color:"#c84b31",background:"#fee2e2",marginLeft:4,fontSize:10}}>⚠ -{Math.abs(soldeApresD)}j</span>}
+                  </>}
+                </td>
                 <td style={{color:"var(--muted)",fontSize:11}}>{d.motif||"—"}</td>
                 <td><div className="actions-row">
                   <button className="btn btn-success btn-sm" onClick={()=>onValider(d.id)}>✓ Approuver</button>
                   <button className="btn btn-danger btn-sm"  onClick={()=>onRefuser(d.id)}>✗ Refuser</button>
                 </div></td>
               </tr>
-            ))}</tbody>
+            )})}</tbody>
           </table></div>
       )}
 
@@ -1022,16 +1034,16 @@ function Validation({ demandes, users, onValider, onRefuser, onAnnuler, onSaisir
 
               {/* Aperçu solde */}
               {salChoisi && jours>0 && (
-                <div className={`info-box ${soldeApres>=0?"info-ok":"info-warn"}`} style={{marginTop:14}}>
+                <div className={`info-box ${soldeApres>=0?"info-ok":"info-yellow"}`} style={{marginTop:14}}>
                   {soldeApres>=0
                     ? `✅ Solde de ${salChoisi.nom} après ce congé : ${soldeApres} jour(s)`
-                    : `⚠ Solde insuffisant pour ${salChoisi.nom} — il manque ${Math.abs(soldeApres)} jour(s)`
+                    : `⚠ Solde insuffisant de ${Math.abs(soldeApres)} j — vous pouvez tout de même créer la demande en anticipation de la prochaine période.`
                   }
                 </div>
               )}
 
               <div className="form-actions" style={{marginTop:18}}>
-                <button className="btn btn-primary" onClick={submitSaisie} disabled={!form.salarieId||jours<=0||soldeApres<0}>
+                <button className="btn btn-primary" onClick={submitSaisie} disabled={!form.salarieId||jours<=0}>
                   📋 Créer la demande (en attente)
                 </button>
               </div>
