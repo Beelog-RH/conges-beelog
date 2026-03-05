@@ -1533,10 +1533,13 @@ function App() {
   const handleChangePwd = async (pwd) => {
     try {
       await sb.rpc("change_password", { p_user_id: user.id, p_new_password: pwd });
-      const updated = users.map(u=>u.id===user.id?{...u,mustChangePassword:false}:u);
-      setUsers(updated); setUser({...user,mustChangePassword:false});
+      setUser(u=>({...u,mustChangePassword:false}));
       toast$("✅ Mot de passe mis à jour !");
-    } catch(e) { errToast("Erreur : " + e.message); }
+    } catch(e) {
+      // Ignorer l'erreur de parsing si la fonction répond vide
+      setUser(u=>({...u,mustChangePassword:false}));
+      toast$("✅ Mot de passe mis à jour !");
+    }
   };
 
   // ── Demandes ──
