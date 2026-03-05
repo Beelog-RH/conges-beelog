@@ -122,7 +122,7 @@ const STATUS = {
 function joursOuvres(debut, fin, feriesMap = {}) {
   let c = 0; const d = new Date(debut), f = new Date(fin);
   while (d <= f) {
-    const day = d.getDay(); const ds = d.toISOString().split("T")[0];
+    const day = d.getDay(); const ds = fmtLocal(d.getFullYear(), d.getMonth()+1, d.getDate());
     if (day !== 0 && day !== 6 && !feriesMap[ds]) c++;
     d.setDate(d.getDate() + 1);
   }
@@ -546,7 +546,7 @@ function Planning({ users, demandes, absences, feriesAll }) {
               <tr>
                 <th style={{textAlign:"left",paddingLeft:10,minWidth:140,position:"sticky",left:0,background:"var(--cream)",zIndex:3}}>Salarié</th>
                 {days.map(d=>{
-                  const ds = d.toISOString().split("T")[0];
+                  const ds = fmtLocal(d.getFullYear(), d.getMonth()+1, d.getDate());
                   const isWE = d.getDay()===0||d.getDay()===6;
                   const isFerie = !!feriesAll[ds];
                   const title = isFerie ? feriesAll[ds] : "";
@@ -562,7 +562,7 @@ function Planning({ users, demandes, absences, feriesAll }) {
                 <tr key={sal.id}>
                   <td className="name-cell">{sal.nom}</td>
                   {days.map(d=>{
-                    const ds = d.toISOString().split("T")[0];
+                    const ds = fmtLocal(d.getFullYear(), d.getMonth()+1, d.getDate());
                     const isWE = d.getDay()===0||d.getDay()===6;
                     const isFerie = !!feriesAll[ds];
                     const info = isWE||isFerie ? null : getDayInfo(sal.id, ds);
