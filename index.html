@@ -4,17 +4,14 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Congés Beelog</title>
-  <!-- React + ReactDOM via CDN -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-  <!-- Babel pour transformer le JSX à la volée -->
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 </head>
 <body>
   <div id="root"></div>
   <script type="text/babel">
     const { useState, useMemo } = React;
-
 
 // ─── Jours fériés France (calcul automatique) ─────────────────────────────────
 // fmt local : évite le décalage UTC de toISOString()
@@ -1394,98 +1391,368 @@ function GestionEmployes({ users, onAdd, onDelete, onUpdate }) {
   </>;
 }
 
-// ─── Root ─────────────────────────────────────────────────────────────────────
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SUPABASE CONFIG — remplacez ces deux valeurs après création du projet
+// ═══════════════════════════════════════════════════════════════════════════
+const SUPABASE_URL = https://dqeyagmsoczdgwlbxhgg.supabase.co;
+const SUPABASE_ANON_KEY = sb_publishable_BstRyMNgdlj4Y9xBH-2BTw_yGxDrBgN;
+
+// Client Supabase léger (sans SDK, appels REST directs)
+const sb = {
+  headers: { "apikey": SUPABASE_ANON_KEY, "Authorization": `Bearer ${SUPABASE_ANON_KEY}`, "Content-Type": "application/json", "Prefer": "return=representation" },
+  url: SUPABASE_URL,
+
+  async select(table, params="") {
+    const r = await fetch(`${this.url}/rest/v1/${table}?${params}`, { headers: this.headers });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  async insert(table, data) {
+    const r = await fetch(`${this.url}/rest/v1/${table}`, { method:"POST", headers: this.headers, body: JSON.stringify(data) });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  async update(table, id, data) {
+    const r = await fetch(`${this.url}/rest/v1/${table}?id=eq.${id}`, { method:"PATCH", headers: this.headers, body: JSON.stringify(data) });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  async delete(table, id) {
+    const r = await fetch(`${this.url}/rest/v1/${table}?id=eq.${id}`, { method:"DELETE", headers: this.headers });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  async rpc(fn, params) {
+    const r = await fetch(`${this.url}/rest/v1/rpc/${fn}`, { method:"POST", headers: this.headers, body: JSON.stringify(params) });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  }
+};
+
+// ─── Helpers Supabase ─────────────────────────────────────────────────────────
+const toUser = r => ({
+  id: r.id, email: r.email, nom: r.nom, role: r.role,
+  isAdmin: r.is_admin, managerId: r.manager_id,
+  solde: r.solde, soldeRTT: r.solde_rtt,
+  mustChangePassword: r.must_change_password,
+  // Ne pas exposer le mot de passe
+});
+
+const toDemande = r => ({
+  id: r.id, salarieId: r.salarie_id, salarie: r.salarie_nom,
+  debut: r.debut, fin: r.fin, jours: r.jours, type: r.type,
+  statut: r.statut, motif: r.motif || "", date_demande: r.date_demande,
+  saisiParManager: r.saisi_par_manager || false,
+});
+
+const toAbsence = r => ({
+  id: r.id, salarieId: r.salarie_id, salarie: r.salarie_nom,
+  type: r.type, debut: r.debut, fin: r.fin, jours: r.jours,
+  commentaire: r.commentaire || "", mois: r.mois, annee: r.annee,
+});
+
+const toHeureSup = r => ({
+  id: r.id, salarieId: r.salarie_id, salarie: r.salarie_nom,
+  heures: r.heures, semaine: r.semaine, commentaire: r.commentaire || "",
+  mois: r.mois, annee: r.annee,
+});
+
+// ─── Root avec Supabase ────────────────────────────────────────────────────────
 function App() {
-  const [users, setUsers] = useState(INIT_USERS);
+  const [users, setUsers] = useState([]);
   const [user, setUser] = useState(null);
   const [page, setPage] = useState("dashboard");
-  const [demandes, setDemandes] = useState(INIT_DEMANDES);
-  const [absences, setAbsences] = useState(INIT_ABSENCES);
-  const [heuresSup, setHeuresSup] = useState(INIT_HEURES_SUP);
-  const [feriesManuels, setFeriesManuels] = useState(INIT_FERIES_MANUELS);
-  // feriesOverrides : { "origDate_YYYY-MM-DD": { newDate: "YYYY-MM-DD" } }
-  // Permet à l'admin de corriger la date calculée d'un férié auto
+  const [demandes, setDemandes] = useState([]);
+  const [absences, setAbsences] = useState([]);
+  const [heuresSup, setHeuresSup] = useState([]);
+  const [feriesManuels, setFeriesManuels] = useState({});
   const [feriesOverrides, setFeriesOverrides] = useState({});
   const [toast, setToast] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [dbError, setDbError] = useState(null);
 
-  const toast$ = msg => { setToast(msg); setTimeout(()=>setToast(null), 3200); };
+  const toast$ = (msg, type="ok") => { setToast({msg,type}); setTimeout(()=>setToast(null), 3400); };
+  const errToast = msg => toast$(msg, "err");
 
-  const syncUser = (updatedUsers, uid) => {
-    const fresh = updatedUsers.find(u=>u.id===uid);
-    if (fresh) setUser(fresh);
+  // Chargement initial de toutes les données
+  const loadAll = async () => {
+    setLoading(true);
+    try {
+      const [us, dem, abs, hsup, ferM, ferO] = await Promise.all([
+        sb.select("employes", "order=nom.asc"),
+        sb.select("demandes", "order=date_demande.desc"),
+        sb.select("absences", "order=debut.desc"),
+        sb.select("heures_sup", "order=semaine.desc"),
+        sb.select("feries_manuels"),
+        sb.select("feries_overrides"),
+      ]);
+      setUsers(us.map(toUser));
+      setDemandes(dem.map(toDemande));
+      setAbsences(abs.map(toAbsence));
+      setHeuresSup(hsup.map(toHeureSup));
+      // feries_manuels : [{date, label}] → {date: label}
+      const fm = {}; ferM.forEach(r => { fm[r.date] = r.label; }); setFeriesManuels(fm);
+      const fo = {}; ferO.forEach(r => { fo[r.orig_date] = { newDate: r.new_date }; }); setFeriesOverrides(fo);
+    } catch(e) {
+      setDbError("Impossible de contacter la base de données. Vérifiez vos clés Supabase.");
+    }
+    setLoading(false);
   };
 
-  // Construit la map complète des fériés effectifs pour le calcul des jours ouvrés
-  // Pour chaque année couverte, applique les overrides puis fusionne manuels
+  React.useEffect(() => { loadAll(); }, []);
+
   const feriesAll = useMemo(() => {
-    const years = [-1, 0, 1, 2].map(d => new Date().getFullYear() + d);
+    const years = [-1,0,1,2].map(d=>new Date().getFullYear()+d);
     const result = {};
     years.forEach(y => {
       const base = getFeriesAuto(y);
-      Object.entries(base).forEach(([origDate, label]) => {
+      Object.entries(base).forEach(([origDate,label]) => {
         const ov = feriesOverrides[origDate];
-        const effectiveDate = ov ? ov.newDate : origDate;
-        result[effectiveDate] = label;
+        result[ov ? ov.newDate : origDate] = label;
       });
     });
-    // Ajoute les jours spéciaux manuels
-    Object.entries(feriesManuels).forEach(([d, label]) => { result[d] = label; });
+    Object.entries(feriesManuels).forEach(([d,label]) => { result[d] = label; });
     return result;
   }, [feriesManuels, feriesOverrides]);
 
-  const handleLogin = (u) => { setUser(u); setPage("dashboard"); };
-  const handleChangePwd = (pwd) => {
-    const updated=users.map(u=>u.id===user.id?{...u,password:pwd,mustChangePassword:false}:u);
-    setUsers(updated); setUser({...user,password:pwd,mustChangePassword:false}); toast$("✅ Mot de passe mis à jour !");
+  // ── Auth ──
+  const handleLogin = async (emailSaisi, pwdSaisi) => {
+    // Vérification côté client (mdp stocké hashé en base, comparaison via RPC)
+    try {
+      const res = await sb.rpc("verify_password", { p_email: emailSaisi, p_password: pwdSaisi });
+      if (!res || !res.id) return "Email ou mot de passe incorrect.";
+      const u = users.find(u => u.id === res.id);
+      if (u) { setUser(u); setPage("dashboard"); return null; }
+      return "Utilisateur introuvable.";
+    } catch(e) {
+      return "Erreur de connexion : " + e.message;
+    }
   };
 
-  const handleNouvelleDemande = (d) => {
-    setDemandes(p=>[{...d,id:genId(),statut:"en_attente",date_demande:new Date().toISOString().split("T")[0]},...p]);
-    toast$("✅ Demande envoyée !"); setPage("historique");
-  };
-  const handleEditDemande = (id,c) => { setDemandes(p=>p.map(d=>d.id===id?{...d,...c}:d)); toast$("✅ Demande modifiée"); };
-  const handleDeleteDemande = (id) => { setDemandes(p=>p.filter(d=>d.id!==id)); toast$("🗑 Demande supprimée"); };
-  const handleValider = (id) => { setDemandes(p=>p.map(d=>d.id===id?{...d,statut:"approuve"}:d)); toast$("✅ Congé approuvé"); };
-  const handleRefuser = (id) => { setDemandes(p=>p.map(d=>d.id===id?{...d,statut:"refuse"}:d)); toast$("✗ Congé refusé"); };
-  const handleAnnuler = (id) => {
-    const d=demandes.find(x=>x.id===id); if (!d) return;
-    const field=d.type==="RTT"?"soldeRTT":"solde";
-    const updated=users.map(u=>u.id===d.salarieId?{...u,[field]:u[field]+d.jours}:u);
-    setUsers(updated); setDemandes(p=>p.map(x=>x.id===id?{...x,statut:"annule"}:x));
-    if (user&&user.id===d.salarieId) syncUser(updated,d.salarieId);
-    toast$(`↩ Annulé — ${d.jours}j recrédités à ${d.salarie}`);
-  };
-  const handleSaisirPourSalarie = (d) => {
-    // Crée la demande en attente — le solde sera débité seulement à la validation
-    setDemandes(p=>[{...d, id:genId(), statut:"en_attente", date_demande:new Date().toISOString().split("T")[0], saisiParManager:true},...p]);
-    toast$(`📋 Demande créée pour ${d.salarie} — en attente de validation`);
+  const handleChangePwd = async (pwd) => {
+    try {
+      await sb.rpc("change_password", { p_user_id: user.id, p_new_password: pwd });
+      const updated = users.map(u=>u.id===user.id?{...u,mustChangePassword:false}:u);
+      setUsers(updated); setUser({...user,mustChangePassword:false});
+      toast$("✅ Mot de passe mis à jour !");
+    } catch(e) { errToast("Erreur : " + e.message); }
   };
 
-  const handleAddAbsence = (a) => { setAbsences(p=>[{...a,id:genId()},...p]); toast$("✅ Absence enregistrée"); };
-  const handleDeleteAbsence = (id) => { setAbsences(p=>p.filter(a=>a.id!==id)); toast$("🗑 Absence supprimée"); };
-  const handleAddHSup = (h) => { setHeuresSup(p=>[{...h,id:genId()},...p]); toast$("✅ Heures enregistrées"); };
-  const handleDeleteHSup = (id) => { setHeuresSup(p=>p.filter(h=>h.id!==id)); toast$("🗑 Supprimé"); };
-
-  const handleAddUser = (data) => { setUsers(p=>[...p,{...data,id:genId()}]); toast$(`✅ Compte créé pour ${data.nom}`); };
-  const handleDeleteUser = (id) => { setUsers(p=>p.filter(u=>u.id!==id)); toast$("🗑 Employé supprimé"); };
-  const handleUpdateUser = (id,c) => {
-    const updated=users.map(u=>u.id===id?{...u,...c}:u);
-    setUsers(updated); if (user&&user.id===id) syncUser(updated,id); toast$("✅ Employé mis à jour");
+  // ── Demandes ──
+  const handleNouvelleDemande = async (d) => {
+    try {
+      const [r] = await sb.insert("demandes", {
+        salarie_id: d.salarieId, salarie_nom: d.salarie,
+        debut: d.debut, fin: d.fin, jours: d.jours, type: d.type,
+        statut: "en_attente", motif: d.motif,
+        date_demande: new Date().toISOString().split("T")[0],
+      });
+      setDemandes(p=>[toDemande(r),...p]);
+      toast$("✅ Demande envoyée !"); setPage("historique");
+    } catch(e) { errToast("Erreur : " + e.message); }
   };
 
-  const handleAddFerie = (date,label) => { setFeriesManuels(f=>({...f,[date]:label})); toast$(`✅ Jour spécial ajouté : ${label}`); };
-  const handleDeleteFerie = (date) => { setFeriesManuels(f=>{ const n={...f}; delete n[date]; return n; }); toast$("🗑 Jour spécial supprimé"); };
-
-  // Override d'une date calculée : origDate → newDate
-  const handleOverrideFerie = (origDate, newDate) => {
-    setFeriesOverrides(ov => ({...ov, [origDate]: { newDate }}));
-    toast$("✅ Date corrigée");
+  const handleEditDemande = async (id, c) => {
+    try {
+      const payload = {};
+      if (c.debut) payload.debut = c.debut;
+      if (c.fin) payload.fin = c.fin;
+      if (c.jours) payload.jours = c.jours;
+      if (c.type) payload.type = c.type;
+      if (c.motif !== undefined) payload.motif = c.motif;
+      await sb.update("demandes", id, payload);
+      setDemandes(p=>p.map(d=>d.id===id?{...d,...c}:d));
+      toast$("✅ Demande modifiée");
+    } catch(e) { errToast("Erreur : " + e.message); }
   };
-  const handleDeleteOverride = (origDate) => {
-    setFeriesOverrides(ov => { const n={...ov}; delete n[origDate]; return n; });
-    toast$("↩ Date rétablie (calcul automatique)");
+
+  const handleDeleteDemande = async (id) => {
+    try {
+      await sb.delete("demandes", id);
+      setDemandes(p=>p.filter(d=>d.id!==id));
+      toast$("🗑 Demande supprimée");
+    } catch(e) { errToast("Erreur : " + e.message); }
   };
 
+  const handleValider = async (id) => {
+    try {
+      const d = demandes.find(x=>x.id===id); if(!d) return;
+      const sal = users.find(u=>u.id===d.salarieId); if(!sal) return;
+      const field = d.type==="RTT" ? "solde_rtt" : "solde";
+      const newSolde = (d.type==="RTT" ? sal.soldeRTT : sal.solde) - d.jours;
+      await sb.update("demandes", id, { statut: "approuve" });
+      await sb.update("employes", sal.id, { [field]: newSolde });
+      setDemandes(p=>p.map(x=>x.id===id?{...x,statut:"approuve"}:x));
+      setUsers(p=>p.map(u=>u.id===sal.id?{...u,[d.type==="RTT"?"soldeRTT":"solde"]:newSolde}:u));
+      if (user && user.id===sal.id) setUser(u=>({...u,[d.type==="RTT"?"soldeRTT":"solde"]:newSolde}));
+      toast$("✅ Congé approuvé");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleRefuser = async (id) => {
+    try {
+      await sb.update("demandes", id, { statut: "refuse" });
+      setDemandes(p=>p.map(d=>d.id===id?{...d,statut:"refuse"}:d));
+      toast$("✗ Congé refusé");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleAnnuler = async (id) => {
+    try {
+      const d = demandes.find(x=>x.id===id); if(!d) return;
+      const sal = users.find(u=>u.id===d.salarieId); if(!sal) return;
+      const field = d.type==="RTT" ? "solde_rtt" : "solde";
+      const newSolde = (d.type==="RTT" ? sal.soldeRTT : sal.solde) + d.jours;
+      await sb.update("demandes", id, { statut: "annule" });
+      await sb.update("employes", sal.id, { [field]: newSolde });
+      setDemandes(p=>p.map(x=>x.id===id?{...x,statut:"annule"}:x));
+      setUsers(p=>p.map(u=>u.id===sal.id?{...u,[d.type==="RTT"?"soldeRTT":"solde"]:newSolde}:u));
+      if (user && user.id===sal.id) setUser(u=>({...u,[d.type==="RTT"?"soldeRTT":"solde"]:newSolde}));
+      toast$(`↩ Annulé — ${d.jours}j recrédités à ${d.salarie}`);
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleSaisirPourSalarie = async (d) => {
+    try {
+      const [r] = await sb.insert("demandes", {
+        salarie_id: d.salarieId, salarie_nom: d.salarie,
+        debut: d.debut, fin: d.fin, jours: d.jours, type: d.type,
+        statut: "en_attente", motif: d.motif || "",
+        date_demande: new Date().toISOString().split("T")[0],
+        saisi_par_manager: true,
+      });
+      setDemandes(p=>[toDemande(r),...p]);
+      toast$(`📋 Demande créée pour ${d.salarie}`);
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  // ── Absences ──
+  const handleAddAbsence = async (a) => {
+    try {
+      const [r] = await sb.insert("absences", {
+        salarie_id: a.salarieId, salarie_nom: a.salarie,
+        type: a.type, debut: a.debut, fin: a.fin, jours: a.jours,
+        commentaire: a.commentaire||"", mois: a.mois, annee: a.annee,
+      });
+      setAbsences(p=>[toAbsence(r),...p]);
+      toast$("✅ Absence enregistrée");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleDeleteAbsence = async (id) => {
+    try {
+      await sb.delete("absences", id);
+      setAbsences(p=>p.filter(a=>a.id!==id));
+      toast$("🗑 Absence supprimée");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  // ── Heures sup ──
+  const handleAddHSup = async (h) => {
+    try {
+      const [r] = await sb.insert("heures_sup", {
+        salarie_id: h.salarieId, salarie_nom: h.salarie,
+        heures: h.heures, semaine: h.semaine,
+        commentaire: h.commentaire||"", mois: h.mois, annee: h.annee,
+      });
+      setHeuresSup(p=>[toHeureSup(r),...p]);
+      toast$("✅ Heures enregistrées");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleDeleteHSup = async (id) => {
+    try {
+      await sb.delete("heures_sup", id);
+      setHeuresSup(p=>p.filter(h=>h.id!==id));
+      toast$("🗑 Supprimé");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  // ── Employés ──
+  const handleAddUser = async (data) => {
+    try {
+      const [r] = await sb.rpc("create_employee", {
+        p_nom: data.nom, p_email: data.email, p_password: data.password,
+        p_role: data.role, p_is_admin: data.isAdmin||false,
+        p_manager_id: data.managerId||null,
+        p_solde: parseInt(data.solde)||25, p_solde_rtt: parseInt(data.soldeRTT)||5,
+      });
+      // Recharger la liste employés
+      const us = await sb.select("employes","order=nom.asc");
+      setUsers(us.map(toUser));
+      toast$(`✅ Compte créé pour ${data.nom}`);
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleDeleteUser = async (id) => {
+    try {
+      await sb.delete("employes", id);
+      setUsers(p=>p.filter(u=>u.id!==id));
+      toast$("🗑 Employé supprimé");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleUpdateUser = async (id, c) => {
+    try {
+      const payload = {};
+      if (c.nom !== undefined) payload.nom = c.nom;
+      if (c.email !== undefined) payload.email = c.email;
+      if (c.role !== undefined) payload.role = c.role;
+      if (c.isAdmin !== undefined) payload.is_admin = c.isAdmin;
+      if (c.managerId !== undefined) payload.manager_id = c.managerId;
+      if (c.solde !== undefined) payload.solde = parseInt(c.solde);
+      if (c.soldeRTT !== undefined) payload.solde_rtt = parseInt(c.soldeRTT);
+      if (c.password) {
+        await sb.rpc("change_password", { p_user_id: id, p_new_password: c.password });
+      }
+      if (Object.keys(payload).length > 0) await sb.update("employes", id, payload);
+      const us = await sb.select("employes","order=nom.asc");
+      const updated = us.map(toUser);
+      setUsers(updated);
+      if (user && user.id===id) setUser(updated.find(u=>u.id===id));
+      toast$("✅ Employé mis à jour");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  // ── Fériés ──
+  const handleAddFerie = async (date, label) => {
+    try {
+      await sb.insert("feries_manuels", { date, label });
+      setFeriesManuels(f=>({...f,[date]:label}));
+      toast$(`✅ Jour spécial ajouté : ${label}`);
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleDeleteFerie = async (date) => {
+    try {
+      const r = await sb.select("feries_manuels", `date=eq.${date}`);
+      if (r[0]) await sb.delete("feries_manuels", r[0].id);
+      setFeriesManuels(f=>{ const n={...f}; delete n[date]; return n; });
+      toast$("🗑 Jour spécial supprimé");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleOverrideFerie = async (origDate, newDate) => {
+    try {
+      const existing = await sb.select("feries_overrides", `orig_date=eq.${origDate}`);
+      if (existing[0]) await sb.update("feries_overrides", existing[0].id, { new_date: newDate });
+      else await sb.insert("feries_overrides", { orig_date: origDate, new_date: newDate });
+      setFeriesOverrides(ov=>({...ov,[origDate]:{newDate}}));
+      toast$("✅ Date corrigée");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleDeleteOverride = async (origDate) => {
+    try {
+      const r = await sb.select("feries_overrides", `orig_date=eq.${origDate}`);
+      if (r[0]) await sb.delete("feries_overrides", r[0].id);
+      setFeriesOverrides(ov=>{ const n={...ov}; delete n[origDate]; return n; });
+      toast$("↩ Date rétablie");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  // ── Render ──
   const pages = user ? {
     dashboard:  <Dashboard user={user} demandes={demandes} />,
     demande:    <NouvelleDemande user={user} onSubmit={handleNouvelleDemande} feriesAll={feriesAll} />,
@@ -1502,7 +1769,33 @@ function App() {
                   onOverride={handleOverrideFerie} onDeleteOverride={handleDeleteOverride} />,
   } : {};
 
-  if (!user) return <><style>{css}</style><LoginScreen users={users} onLogin={handleLogin} /></>;
+  if (dbError) return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#f7f4ef",fontFamily:"sans-serif"}}>
+      <div style={{background:"#fff",padding:40,borderRadius:12,boxShadow:"0 4px 24px rgba(0,0,0,.1)",maxWidth:480,textAlign:"center"}}>
+        <div style={{fontSize:40,marginBottom:16}}>⚠️</div>
+        <h2 style={{marginBottom:8,color:"#1a1a2e"}}>Connexion à la base de données impossible</h2>
+        <p style={{color:"#8a8070",marginBottom:20,lineHeight:1.6}}>{dbError}</p>
+        <p style={{fontSize:12,color:"#c84b31"}}>Vérifiez que SUPABASE_URL et SUPABASE_ANON_KEY sont corrects dans le fichier index.html</p>
+      </div>
+    </div>
+  );
+
+  if (loading) return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#f7f4ef",fontFamily:"sans-serif"}}>
+      <div style={{textAlign:"center"}}>
+        <div style={{fontSize:40,marginBottom:16}}>🌴</div>
+        <p style={{color:"#8a8070",fontSize:16}}>Chargement des données…</p>
+      </div>
+    </div>
+  );
+
+  // LoginScreen modifié pour passer email+pwd plutôt que l'objet user
+  if (!user) return (
+    <>
+      <style>{css}</style>
+      <LoginScreenSupabase onLogin={handleLogin} />
+    </>
+  );
   if (user.mustChangePassword) return <><style>{css}</style><ChangePasswordScreen onDone={handleChangePwd} /></>;
 
   return <>
@@ -1510,8 +1803,48 @@ function App() {
     <Shell user={user} page={page} setPage={setPage} onLogout={()=>setUser(null)}>
       {pages[page]||pages.dashboard}
     </Shell>
-    {toast&&<div className="toast">{toast}</div>}
+    {toast&&<div className={`toast ${toast.type==="err"?"toast-err":""}`}>{toast.msg}</div>}
   </>;
+}
+
+// ─── Login Supabase (email + password sans objet user) ────────────────────────
+function LoginScreenSupabase({ onLogin }) {
+  const [email, setEmail] = useState("");
+  const [pwd, setPwd] = useState("");
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async () => {
+    if (!email||!pwd) return setErr("Email et mot de passe requis.");
+    setLoading(true); setErr("");
+    const error = await onLogin(email.trim().toLowerCase(), pwd);
+    if (error) setErr(error);
+    setLoading(false);
+  };
+
+  return (
+    <div className="login-wrap">
+      <div className="login-brand">
+        <div className="login-brand-icon">🌴</div>
+        <h1>Gestion des congés Beelog</h1>
+        <p>Gestion des congés et absences</p>
+      </div>
+      <div className="login-form-side">
+        <div className="login-card">
+          <h2>Connexion</h2>
+          <p>Accédez à votre espace</p>
+          <div className="field"><label>Email</label>
+            <input type="email" value={email} placeholder="vous@beelog.fr" onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()} /></div>
+          <div className="field"><label>Mot de passe</label>
+            <input type="password" value={pwd} placeholder="••••••••" onChange={e=>setPwd(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()} /></div>
+          {err&&<div className="error-msg">⚠ {err}</div>}
+          <button className="btn btn-primary btn-full" onClick={submit} disabled={loading}>
+            {loading ? "Connexion…" : "Se connecter →"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 
