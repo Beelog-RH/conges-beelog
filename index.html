@@ -1517,13 +1517,17 @@ function App() {
   }, [feriesManuels, feriesOverrides]);
 
   // ── Auth ──
-  const handleLogin = async (emailSaisi, pwdSaisi) => {
-    // Vérification côté client (mdp stocké hashé en base, comparaison via RPC)
+ const handleLogin = async (emailSaisi, pwdSaisi) => {
     try {
       const res = await sb.rpc("verify_password", { p_email: emailSaisi, p_password: pwdSaisi });
       if (!res || !res[0] || !res[0].id) return "Email ou mot de passe incorrect.";
-		const u = users.find(u => u.id === res[0].id);
-      if (u) { setUser(u); setPage("dashboard"); return null; }
+      const u = users.find(u => u.id === res[0].id);
+      if (u) {
+        // Utiliser must_change_password depuis la base, pas depuis le state local
+        setUser({...u, mustChangePassword: res[0].must_change_password});
+        setPage("dashboard");
+        return null;
+      }
       return "Utilisateur introuvable.";
     } catch(e) {
       return "Erreur de connexion : " + e.message;
