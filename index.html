@@ -1521,8 +1521,8 @@ function App() {
     // Vérification côté client (mdp stocké hashé en base, comparaison via RPC)
     try {
       const res = await sb.rpc("verify_password", { p_email: emailSaisi, p_password: pwdSaisi });
-      if (!res || !res.id) return "Email ou mot de passe incorrect.";
-      const u = users.find(u => u.id === res.id);
+      if (!res || !res[0] || !res[0].id) return "Email ou mot de passe incorrect.";
+		const u = users.find(u => u.id === res[0].id);
       if (u) { setUser(u); setPage("dashboard"); return null; }
       return "Utilisateur introuvable.";
     } catch(e) {
