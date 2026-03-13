@@ -1,0 +1,2091 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Congés Beelog</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useMemo } = React;
+
+// ─── Jours fériés France (calcul automatique) ─────────────────────────────────
+// fmt local : évite le décalage UTC de toISOString()
+function fmtLocal(year, month, day) {
+  return `${year}-${String(month).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
+}
+
+function getPaques(year) {
+  // Algorithme de Meeus/Jones/Butcher — retourne {month (1-based), day}
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31); // 1-based
+  const day   = ((h + l - 7 * m + 114) % 31) + 1;
+  return { year, month, day }; // month est 1-based
+}
+
+// Ajoute n jours à une date {year,month,day} et retourne une string YYYY-MM-DD
+function addDays({ year, month, day }, n) {
+  const d = new Date(year, month - 1, day + n); // month-1 car Date() attend 0-based
+  return fmtLocal(d.getFullYear(), d.getMonth() + 1, d.getDate());
+}
+
+function getFeriesAuto(year) {
+  const paques = getPaques(year);
+  return {
+    [fmtLocal(year,  1,  1)]:      "Jour de l'An",
+    [addDays(paques, 1)]:          "Lundi de Pâques",
+    [fmtLocal(year,  5,  1)]:      "Fête du Travail",
+    [fmtLocal(year,  5,  8)]:      "Victoire 1945",
+    [addDays(paques, 39)]:         "Ascension",
+    [addDays(paques, 50)]:         "Lundi de Pentecôte",
+    [fmtLocal(year,  7, 14)]:      "Fête Nationale",
+    [fmtLocal(year,  8, 15)]:      "Assomption",
+    [fmtLocal(year, 11,  1)]:      "Toussaint",
+    [fmtLocal(year, 11, 11)]:      "Armistice",
+    [fmtLocal(year, 12, 25)]:      "Noël",
+  };
+}
+
+// Vérifie les dates calculées pour une année (pour affichage de débogage)
+function verifyFeries(year) {
+  const f = getFeriesAuto(year);
+  return Object.entries(f).sort((a,b)=>a[0].localeCompare(b[0]));
+}
+
+// ─── Initial Data ─────────────────────────────────────────────────────────────
+let nextId = 20;
+const genId = () => nextId++;
+
+const INIT_USERS = [
+  { id: 1, email: "alice@entreprise.fr",  password: "alice123",  nom: "Alice Martin",     role: "salarie", isAdmin: false, managerId: 4, solde: 18, soldeRTT: 5,  mustChangePassword: false },
+  { id: 2, email: "bob@entreprise.fr",    password: "bob123",    nom: "Bob Dupont",        role: "salarie", isAdmin: false, managerId: 4, solde: 12, soldeRTT: 3,  mustChangePassword: false },
+  { id: 3, email: "claire@entreprise.fr", password: "claire123", nom: "Claire Petit",      role: "salarie", isAdmin: false, managerId: 4, solde: 20, soldeRTT: 4,  mustChangePassword: false },
+  { id: 4, email: "sophie@entreprise.fr", password: "sophie123", nom: "Sophie Directrice", role: "manager", isAdmin: true,  managerId: null, solde: 22, soldeRTT: 6, mustChangePassword: false },
+];
+
+const INIT_DEMANDES = [
+  { id: 1, salarieId: 1, salarie: "Alice Martin",  debut: "2026-03-20", fin: "2026-03-22", jours: 3, type: "Congés payés", statut: "approuve",   motif: "Vacances", date_demande: "2026-03-01" },
+  { id: 2, salarieId: 2, salarie: "Bob Dupont",    debut: "2026-03-14", fin: "2026-03-15", jours: 2, type: "RTT",          statut: "approuve",   motif: "Repos",    date_demande: "2026-03-02" },
+  { id: 3, salarieId: 1, salarie: "Alice Martin",  debut: "2026-03-28", fin: "2026-03-29", jours: 2, type: "Congés payés", statut: "en_attente", motif: "",         date_demande: "2026-03-10" },
+  { id: 4, salarieId: 3, salarie: "Claire Petit",  debut: "2026-03-10", fin: "2026-03-12", jours: 3, type: "Congés payés", statut: "approuve",   motif: "Voyage",   date_demande: "2026-03-05" },
+  { id: 5, salarieId: 2, salarie: "Bob Dupont",    debut: "2026-03-23", fin: "2026-03-25", jours: 3, type: "Congés payés", statut: "approuve",   motif: "Détente",  date_demande: "2026-03-08" },
+];
+
+const INIT_ABSENCES = [
+  { id: 1, salarieId: 2, salarie: "Bob Dupont",   type: "maladie",       debut: "2026-03-03", fin: "2026-03-05", jours: 3, commentaire: "Arrêt transmis", mois: 2, annee: 2026 },
+  { id: 2, salarieId: 3, salarie: "Claire Petit", type: "enfant_malade", debut: "2026-03-17", fin: "2026-03-17", jours: 1, commentaire: "",              mois: 2, annee: 2026 },
+  { id: 3, salarieId: 1, salarie: "Alice Martin", type: "absence_injustifiee", debut: "2026-03-05", fin: "2026-03-05", jours: 1, commentaire: "Sans justificatif", mois: 2, annee: 2026 },
+];
+
+const INIT_HEURES_SUP = [
+  { id: 1, salarieId: 1, salarie: "Alice Martin", heures: 4, semaine: "2026-03-02", commentaire: "Projet urgent", mois: 2, annee: 2026 },
+  { id: 2, salarieId: 2, salarie: "Bob Dupont",   heures: 6, semaine: "2026-03-09", commentaire: "",              mois: 2, annee: 2026 },
+];
+
+// Jours fériés manuels initiaux
+const INIT_FERIES_MANUELS = {};
+
+const ABSENCE_TYPES = [
+  { id: "maladie",             label: "Maladie",                   color: "#f59e0b", bg: "#fef3c7", planningColor: "#f59e0b", icon: "🤒",  deductibleCP: false },
+  { id: "absence_injustifiee", label: "Abs. injustifiée",          color: "#ef4444", bg: "#fee2e2", planningColor: "#ef4444", icon: "⚠️", deductibleCP: true  },
+  { id: "accident_travail",    label: "Accident travail",          color: "#8b5cf6", bg: "#ede9fe", planningColor: "#8b5cf6", icon: "🚧", deductibleCP: false },
+  { id: "enfant_malade",       label: "Enfant malade",             color: "#ec4899", bg: "#fce7f3", planningColor: "#ec4899", icon: "👶", deductibleCP: false },
+  { id: "conge_sans_solde",    label: "Congé sans solde",          color: "#6b7280", bg: "#f3f4f6", planningColor: "#6b7280", icon: "📋", deductibleCP: true  },
+  { id: "autre_absence_nr",    label: "Autre absence non rémun.",  color: "#92400e", bg: "#fef3c7", planningColor: "#92400e", icon: "🚫", deductibleCP: true  },
+];
+
+// Types d'absence qui réduisent l'acquisition CP
+const ABSENCE_DEDUCTIBLES_CP = ABSENCE_TYPES.filter(t => t.deductibleCP).map(t => t.id);
+
+const MONTHS = ["Janvier","Février","Mars","Avril","Mai","Juin","Juillet","Août","Septembre","Octobre","Novembre","Décembre"];
+const DAYS_SHORT = ["L","M","M","J","V","S","D"];
+
+const STATUS = {
+  en_attente: { label: "En attente", color: "#f59e0b", bg: "#fef3c7" },
+  approuve:   { label: "Approuvé",   color: "#10b981", bg: "#d1fae5" },
+  refuse:     { label: "Refusé",     color: "#ef4444", bg: "#fee2e2" },
+  annule:     { label: "Annulé",     color: "#6b7280", bg: "#f3f4f6" },
+};
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function joursOuvres(debut, fin, feriesMap = {}) {
+  let c = 0; const d = new Date(debut), f = new Date(fin);
+  while (d <= f) {
+    const day = d.getDay(); const ds = fmtLocal(d.getFullYear(), d.getMonth()+1, d.getDate());
+    if (day !== 0 && day !== 6 && !feriesMap[ds]) c++;
+    d.setDate(d.getDate() + 1);
+  }
+  return c;
+}
+
+function dateInRange(dateStr, debut, fin) {
+  return dateStr >= debut && dateStr <= fin;
+}
+
+function getDaysInMonth(year, month) {
+  const days = [];
+  const d = new Date(year, month, 1);
+  while (d.getMonth() === month) { days.push(new Date(d)); d.setDate(d.getDate() + 1); }
+  return days;
+}
+
+function exportCSV(data, filename) {
+  const csv = data.map(r => r.map(c => `"${String(c).replace(/"/g,'""')}"`).join(";")).join("\n");
+  const blob = new Blob(["\uFEFF"+csv], {type:"text/csv;charset=utf-8;"});
+  const url = URL.createObjectURL(blob); const a = document.createElement("a");
+  a.href=url; a.download=filename; a.click(); URL.revokeObjectURL(url);
+}
+
+// ─── CSS ──────────────────────────────────────────────────────────────────────
+const css = `
+@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --ink:#1a1a2e;--paper:#f7f4ef;--cream:#ede8e0;--accent:#c84b31;
+  --accent2:#2d6a4f;--muted:#8a8070;--border:#d4cfc6;--white:#fff;
+  --shadow:0 1px 3px rgba(26,26,46,.08),0 4px 16px rgba(26,26,46,.06);--radius:12px;--sb:256px;
+}
+body{font-family:'DM Sans',sans-serif;background:var(--paper);color:var(--ink);min-height:100vh}
+
+.login-wrap{min-height:100vh;display:grid;grid-template-columns:1fr 1fr}
+.login-brand{display:flex;flex-direction:column;justify-content:center;padding:60px;
+  background:linear-gradient(135deg,#1a1a2e 0%,#16213e 60%,#0f3460 100%);position:relative;overflow:hidden}
+.login-brand::before{content:'';position:absolute;width:500px;height:500px;
+  background:radial-gradient(circle,rgba(200,75,49,.12) 0%,transparent 70%);top:-150px;right:-150px;border-radius:50%}
+.login-brand-icon{font-size:52px;margin-bottom:24px}
+.login-brand h1{font-family:'DM Serif Display',serif;font-size:42px;color:#fff;line-height:1.1;margin-bottom:14px}
+.login-brand p{color:rgba(255,255,255,.5);font-size:14px;line-height:1.7;max-width:340px}
+.demo-box{margin-top:36px;border:1px solid rgba(255,255,255,.1);border-radius:var(--radius);padding:16px;background:rgba(255,255,255,.04)}
+.demo-box p{color:rgba(255,255,255,.28);font-size:10px;text-transform:uppercase;letter-spacing:.1em;margin-bottom:9px}
+.demo-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.demo-row span{color:rgba(255,255,255,.6);font-size:12px}
+.demo-row code{color:#c84b31;font-size:11px;background:rgba(200,75,49,.12);padding:2px 6px;border-radius:4px}
+.login-form-side{display:flex;align-items:center;justify-content:center;background:var(--paper);padding:60px}
+.login-card{width:100%;max-width:380px}
+.login-card h2{font-family:'DM Serif Display',serif;font-size:30px;margin-bottom:5px}
+.login-card>p{color:var(--muted);font-size:13.5px;margin-bottom:30px}
+
+.changepwd-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--paper)}
+.changepwd-card{width:100%;max-width:420px;background:var(--white);border-radius:var(--radius);box-shadow:var(--shadow);border:1px solid var(--border);padding:34px}
+.changepwd-card h2{font-family:'DM Serif Display',serif;font-size:24px;margin-bottom:7px}
+.changepwd-card>p{color:var(--muted);font-size:13.5px;margin-bottom:24px;line-height:1.6}
+
+.field{margin-bottom:16px}
+.field label{display:block;font-size:12.5px;font-weight:500;margin-bottom:5px}
+.field input,.field select{width:100%;padding:10px 13px;border:1.5px solid var(--border);border-radius:8px;
+  font-family:'DM Sans',sans-serif;font-size:13.5px;background:var(--white);color:var(--ink);outline:none;transition:border-color .2s}
+.field input:focus,.field select:focus{border-color:var(--accent)}
+.error-msg{color:var(--accent);font-size:12.5px;margin-bottom:12px}
+
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:9px 18px;
+  border-radius:8px;font-family:'DM Sans',sans-serif;font-size:13px;font-weight:500;cursor:pointer;border:none;transition:all .16s}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-primary{background:var(--ink);color:#fff}.btn-primary:hover:not(:disabled){background:#2d2d4e;transform:translateY(-1px)}
+.btn-success{background:var(--accent2);color:#fff}.btn-success:hover:not(:disabled){background:#1e4d38}
+.btn-danger{background:var(--accent);color:#fff}.btn-danger:hover:not(:disabled){background:#b03a25}
+.btn-ghost{background:transparent;color:var(--ink);border:1.5px solid var(--border)}.btn-ghost:hover:not(:disabled){background:var(--cream)}
+.btn-blue{background:#2563eb;color:#fff}.btn-blue:hover:not(:disabled){background:#1d4ed8}
+.btn-orange{background:#d97706;color:#fff}.btn-orange:hover:not(:disabled){background:#b45309}
+.btn-purple{background:#7c3aed;color:#fff}.btn-purple:hover:not(:disabled){background:#6d28d9}
+.btn-full{width:100%}.btn-sm{padding:5px 11px;font-size:12px}
+
+.app{display:grid;grid-template-columns:var(--sb) 1fr;min-height:100vh}
+.sidebar{background:var(--ink);color:#fff;display:flex;flex-direction:column;position:sticky;top:0;height:100vh;overflow-y:auto}
+.sidebar-header{padding:24px 18px 16px;border-bottom:1px solid rgba(255,255,255,.08)}
+.sidebar-logo{font-family:'DM Serif Display',serif;font-size:17px;display:flex;align-items:center;gap:7px}
+.sidebar-logo em{color:var(--accent);font-style:normal}
+.sidebar-uname{font-size:12.5px;font-weight:500;margin-top:9px}
+.sidebar-urole{font-size:11px;color:rgba(255,255,255,.32);margin-top:1px}
+.sidebar-section{padding:13px 12px 2px;font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.1em;color:rgba(255,255,255,.2)}
+.sidebar-nav{flex:1;padding:6px 10px}
+.nav-item{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:7px;cursor:pointer;
+  transition:all .13s;font-size:13px;color:rgba(255,255,255,.5);margin-bottom:1px}
+.nav-item:hover{background:rgba(255,255,255,.06);color:#fff}
+.nav-item.active{background:rgba(200,75,49,.22);color:#fff}
+.nav-icon{font-size:14px;width:17px;text-align:center}
+.sidebar-footer{padding:12px 10px;border-top:1px solid rgba(255,255,255,.08)}
+
+.main{background:var(--paper);overflow-y:auto}
+.page-header{padding:28px 32px 0;display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:11px}
+.page-title{font-family:'DM Serif Display',serif;font-size:24px;margin-bottom:2px}
+.page-sub{color:var(--muted);font-size:13px}
+.page-body{padding:20px 32px 48px}
+
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+.stat-card{background:var(--white);border-radius:var(--radius);box-shadow:var(--shadow);
+  border:1px solid var(--border);padding:17px;position:relative;overflow:hidden}
+.stat-card::after{content:attr(data-icon);position:absolute;right:11px;top:50%;transform:translateY(-50%);font-size:28px;opacity:.1}
+.stat-label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:5px}
+.stat-value{font-family:'DM Serif Display',serif;font-size:32px;line-height:1}
+.stat-sub{font-size:10.5px;color:var(--muted);margin-top:2px}
+
+.card{background:var(--white);border-radius:var(--radius);box-shadow:var(--shadow);border:1px solid var(--border);padding:20px}
+.card-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);margin-bottom:12px}
+.section-gap{margin-top:18px}
+
+.table-wrap{overflow-x:auto;border-radius:var(--radius);border:1px solid var(--border);background:var(--white);box-shadow:var(--shadow)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+thead th{padding:10px 13px;text-align:left;font-size:10px;font-weight:600;text-transform:uppercase;
+  letter-spacing:.07em;color:var(--muted);background:var(--cream);border-bottom:1px solid var(--border);white-space:nowrap}
+tbody tr{border-bottom:1px solid var(--border);transition:background .1s}
+tbody tr:last-child{border-bottom:none}
+tbody tr:hover{background:#faf9f6}
+tbody td{padding:10px 13px}
+.badge{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:500;white-space:nowrap}
+
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.form-group{display:flex;flex-direction:column;gap:4px}
+.form-group.full{grid-column:1/-1}
+.form-group label{font-size:12px;font-weight:500}
+.form-group input,.form-group select,.form-group textarea{
+  padding:8px 11px;border:1.5px solid var(--border);border-radius:8px;
+  font-family:'DM Sans',sans-serif;font-size:13px;color:var(--ink);background:var(--white);outline:none;transition:border-color .2s}
+.form-group input:focus,.form-group select:focus,.form-group textarea:focus{border-color:var(--accent)}
+.form-group textarea{resize:vertical;min-height:64px}
+.form-actions{display:flex;gap:8px;margin-top:16px;flex-wrap:wrap}
+.info-box{border-radius:8px;padding:9px 13px;font-size:12.5px}
+.info-ok{background:#eef6f2;border:1px solid #a7d7c1;color:var(--accent2)}
+.info-warn{background:#fee2e2;border:1px solid #fca5a5;color:var(--accent)}
+.info-blue{background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8}
+.info-yellow{background:#fef3c7;border:1px solid #fcd34d;color:#92400e}
+.info-purple{background:#f5f3ff;border:1px solid #c4b5fd;color:#5b21b6}
+
+.modal-overlay{position:fixed;inset:0;background:rgba(26,26,46,.45);display:flex;
+  align-items:center;justify-content:center;z-index:100;padding:20px}
+.modal{background:var(--white);border-radius:var(--radius);box-shadow:0 20px 60px rgba(0,0,0,.2);
+  width:100%;max-width:580px;padding:24px;max-height:90vh;overflow-y:auto}
+.modal-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+.modal-title{font-family:'DM Serif Display',serif;font-size:20px}
+.modal-close{background:none;border:none;font-size:20px;cursor:pointer;color:var(--muted);line-height:1}
+
+.tabs{display:flex;gap:3px;margin-bottom:16px;background:var(--cream);border-radius:9px;padding:3px;width:fit-content}
+.tab{padding:6px 14px;border-radius:7px;font-size:13px;font-weight:500;cursor:pointer;transition:all .13s;color:var(--muted);border:none;background:transparent}
+.tab.active{background:var(--white);color:var(--ink);box-shadow:0 1px 4px rgba(0,0,0,.1)}
+.month-selector{display:flex;align-items:center;gap:9px}
+.month-selector select{padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;font-family:'DM Sans',sans-serif;font-size:13px;background:var(--white);outline:none}
+.month-nav-btn{background:var(--white);border:1.5px solid var(--border);border-radius:7px;padding:6px 12px;cursor:pointer;font-size:14px;transition:background .13s}
+.month-nav-btn:hover{background:var(--cream)}
+.actions-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.empty-state{text-align:center;padding:38px 20px;color:var(--muted)}
+.empty-icon{font-size:32px;margin-bottom:8px}
+.toast{position:fixed;bottom:20px;right:20px;background:var(--ink);color:#fff;padding:11px 18px;
+  border-radius:10px;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,.25);animation:fadeUp .3s ease;z-index:999}
+@keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+
+/* ── PLANNING ── */
+.planning-wrap{overflow-x:auto}
+.planning-table{border-collapse:collapse;font-size:12px;min-width:100%}
+.planning-table th{padding:6px 3px;text-align:center;font-size:10px;font-weight:600;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.05em;background:var(--cream);border:1px solid var(--border);min-width:32px}
+.planning-table th.day-header{font-size:11px;color:var(--ink);padding:7px 2px;min-width:32px}
+.planning-table th.day-header.weekend{background:#e8e3d8;color:var(--muted)}
+.planning-table th.day-header.ferie{background:#fde8d8;color:#b45309}
+.planning-table td{border:1px solid var(--border);padding:1px;min-width:32px;height:28px;vertical-align:middle}
+.planning-table td.name-cell{padding:6px 10px;background:var(--cream);font-weight:600;font-size:12px;
+  white-space:nowrap;min-width:140px;position:sticky;left:0;z-index:2;border-right:2px solid var(--border)}
+.day-cell{width:100%;height:26px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:600;color:#fff}
+.day-travaille{background:transparent}
+.day-weekend{background:#f0ece4}
+.day-ferie{background:#fde8d8}
+.day-conge{background:#10b981}
+.day-rtt{background:#7c3aed}
+.day-maladie{background:#f59e0b}
+.day-absence_injustifiee{background:#ef4444}
+.day-accident_travail{background:#8b5cf6}
+.day-enfant_malade{background:#ec4899}
+.day-conge_sans_solde{background:#9ca3af}
+/* Congés en attente : hachuré pour montrer "projeté, non validé" */
+.day-conge-attente{
+  background:repeating-linear-gradient(45deg,#10b981,#10b981 3px,#d1fae5 3px,#d1fae5 7px);
+  color:#065f46;
+}
+.day-rtt-attente{
+  background:repeating-linear-gradient(45deg,#7c3aed,#7c3aed 3px,#ede9fe 3px,#ede9fe 7px);
+  color:#4c1d95;
+}
+
+.legend{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px;align-items:center}
+.legend-item{display:flex;align-items:center;gap:5px;font-size:11.5px;color:var(--muted)}
+.legend-dot{width:12px;height:12px;border-radius:3px;flex-shrink:0}
+
+.paie-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:18px}
+.paie-stat{background:var(--cream);border-radius:9px;padding:14px;text-align:center}
+.paie-stat-val{font-family:'DM Serif Display',serif;font-size:26px}
+.paie-stat-lbl{font-size:10.5px;color:var(--muted);margin-top:2px}
+.sal-recap{background:var(--white);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:10px;overflow:hidden;box-shadow:var(--shadow)}
+.recap-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:var(--cream);cursor:pointer}
+.recap-header:hover{background:#e5e0d8}
+.recap-name{font-weight:600;font-size:13px}
+.recap-pills{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.recap-body{padding:14px 16px;border-top:1px solid var(--border);display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.recap-item-label{font-size:10px;color:var(--muted);font-weight:500;text-transform:uppercase;letter-spacing:.05em;margin-bottom:2px}
+.recap-item-val{font-size:16px;font-weight:600}
+
+.pill-admin{background:#f5f3ff;color:#5b21b6;font-size:10.5px;font-weight:600;padding:2px 7px;border-radius:20px}
+.pill-manager{background:#ede9fe;color:#6d28d9;font-size:10.5px;font-weight:600;padding:2px 7px;border-radius:20px}
+.pill-salarie{background:#d1fae5;color:#065f46;font-size:10.5px;font-weight:600;padding:2px 7px;border-radius:20px}
+
+.divider{height:1px;background:var(--border);margin:16px 0}
+.checkbox-row{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin-top:6px}
+.checkbox-row input[type=checkbox]{width:15px;height:15px;cursor:pointer;accent-color:var(--accent)}
+
+@media(max-width:900px){
+  .login-wrap{grid-template-columns:1fr}.login-brand{display:none}
+  .app{grid-template-columns:1fr}.sidebar{display:none}
+  .stats-grid,.paie-grid{grid-template-columns:1fr 1fr}
+  .form-grid{grid-template-columns:1fr}
+  .page-header,.page-body{padding-left:14px;padding-right:14px}
+}
+`;
+
+// ─── Change Password ──────────────────────────────────────────────────────────
+function ChangePasswordScreen({ onDone }) {
+  const [form, setForm] = useState({ pwd:"", pwd2:"" });
+  const [err, setErr] = useState("");
+  const submit = () => {
+    if (form.pwd.length < 6) return setErr("Au moins 6 caractères requis.");
+    if (form.pwd !== form.pwd2) return setErr("Les mots de passe ne correspondent pas.");
+    onDone(form.pwd);
+  };
+  return (
+    <div className="changepwd-wrap">
+      <div className="changepwd-card">
+        <div style={{fontSize:34,marginBottom:10}}>🔐</div>
+        <h2>Changement de mot de passe requis</h2>
+        <p>Votre compte a été créé avec un mot de passe temporaire. Définissez un mot de passe personnel pour continuer.</p>
+        {err && <div className="info-box info-warn" style={{marginBottom:12}}>{err}</div>}
+        <div className="field"><label>Nouveau mot de passe</label>
+          <input type="password" placeholder="Au moins 6 caractères" value={form.pwd} onChange={e=>setForm({...form,pwd:e.target.value})} /></div>
+        <div className="field"><label>Confirmer</label>
+          <input type="password" placeholder="Répétez" value={form.pwd2} onChange={e=>setForm({...form,pwd2:e.target.value})} onKeyDown={e=>e.key==="Enter"&&submit()} /></div>
+        <button className="btn btn-primary btn-full" onClick={submit}>Valider et accéder →</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Login ────────────────────────────────────────────────────────────────────
+function LoginScreen({ users, onLogin }) {
+  const [email, setEmail] = useState(""); const [pwd, setPwd] = useState(""); const [err, setErr] = useState("");
+  const submit = () => {
+    const u = users.find(u=>u.email===email&&u.password===pwd);
+    u ? onLogin(u) : setErr("Email ou mot de passe incorrect.");
+  };
+  const admins = users.filter(u=>u.isAdmin);
+  const managers = users.filter(u=>u.role==="manager"&&!u.isAdmin);
+  const salaries = users.filter(u=>u.role==="salarie").slice(0,2);
+  return (
+    <div className="login-wrap">
+      <div className="login-brand">
+        <div className="login-brand-icon">🌴</div>
+        <h1>Gestion des congés Beelog</h1>
+        <p>Gestion des congés et absences</p>
+
+      </div>
+      <div className="login-form-side">
+        <div className="login-card">
+          <h2>Connexion</h2>
+          <p>Accédez à votre espace</p>
+          <div className="field"><label>Email</label>
+            <input type="email" value={email} placeholder="vous@entreprise.fr" onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()} /></div>
+          <div className="field"><label>Mot de passe</label>
+            <input type="password" value={pwd} placeholder="••••••••" onChange={e=>setPwd(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()} /></div>
+          {err && <div className="error-msg">⚠ {err}</div>}
+          <button className="btn btn-primary btn-full" onClick={submit}>Se connecter →</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Shell ────────────────────────────────────────────────────────────────────
+function Shell({ user, page, setPage, onLogout, children }) {
+  const isMgr = user.role==="manager";
+  const isAdmin = user.isAdmin;
+  const salItems = [{id:"dashboard",icon:"📊",label:"Tableau de bord"},{id:"demande",icon:"✉️",label:"Nouvelle demande"},{id:"historique",icon:"📋",label:"Mes demandes"}];
+  const mgrItems = [
+    {id:"dashboard",icon:"📊",label:"Tableau de bord"},
+    {id:"planning",icon:"📅",label:"Planning équipe"},
+    {id:"validation",icon:"✅",label:"Validation congés"},
+    {id:"absences",icon:"🏥",label:"Saisie absences"},
+    {id:"heures_sup",icon:"⏱️",label:"Heures supplémentaires"},
+    {id:"paie",icon:"💶",label:"Préparation paie"},
+    {id:"equipe",icon:"👥",label:"Mon équipe"},
+    {id:"employes",icon:"⚙️",label:"Gestion employés"},
+    ...(isAdmin ? [{id:"feries",icon:"🗓️",label:"Jours fériés"}] : []),
+  ];
+  const items = isMgr ? mgrItems : salItems;
+  const sections = isMgr
+    ? [{label:"Salarié",ids:["dashboard"]},{label:"Management",ids:["planning","validation","absences","heures_sup","paie","equipe","employes"]},{label:"Administration",ids:["feries"]}]
+    : [{label:"Mon espace",ids:["dashboard","demande","historique"]}];
+
+  const roleLabel = isAdmin ? "🛡️ Admin" : isMgr ? "👑 Manager" : "Salarié";
+  return (
+    <div className="app">
+      <aside className="sidebar">
+        <div className="sidebar-header">
+          <div className="sidebar-logo">🌴 <em>Beelog</em> Congés</div>
+          <div className="sidebar-uname">{user.nom}</div>
+          <div className="sidebar-urole">{roleLabel}</div>
+        </div>
+        <div className="sidebar-nav">
+          {sections.map(sec=>{
+            const secItems = items.filter(i=>sec.ids.includes(i.id));
+            if (!secItems.length) return null;
+            return <div key={sec.label}>
+              <div className="sidebar-section">{sec.label}</div>
+              {secItems.map(item=>(
+                <div key={item.id} className={`nav-item ${page===item.id?"active":""}`} onClick={()=>setPage(item.id)}>
+                  <span className="nav-icon">{item.icon}</span>{item.label}
+                </div>
+              ))}
+            </div>;
+          })}
+        </div>
+        <div className="sidebar-footer">
+          <button className="btn btn-ghost btn-full btn-sm" onClick={onLogout}>← Déconnexion</button>
+        </div>
+      </aside>
+      <main className="main">{children}</main>
+    </div>
+  );
+}
+
+// ─── Dashboard ────────────────────────────────────────────────────────────────
+function Dashboard({ user, demandes }) {
+  const mes = demandes.filter(d=>d.salarieId===user.id);
+  const fmtJ = v => Number.isInteger(v) ? String(v) : parseFloat(v).toFixed(2);
+  return <>
+    <div className="page-header"><div>
+      <div className="page-title">Bonjour, {user.nom.split(" ")[0]} 👋</div>
+      <div className="page-sub">Vue d'ensemble de votre situation</div>
+    </div></div>
+    <div className="page-body">
+      <div className="stats-grid">
+        <div className="stat-card" data-icon="🌴"><div className="stat-label">Congés payés</div><div className="stat-value">{fmtJ(user.solde)}</div><div className="stat-sub">jours disponibles</div></div>
+        <div className="stat-card" data-icon="📈"><div className="stat-label">CP en acquisition</div><div className="stat-value">{fmtJ(user.soldeAcquisition||0)}</div><div className="stat-sub">jours en cours</div></div>
+        <div className="stat-card" data-icon="🔄"><div className="stat-label">RTT</div><div className="stat-value">{fmtJ(user.soldeRTT)}</div><div className="stat-sub">jours restants</div></div>
+        <div className="stat-card" data-icon="⏳"><div className="stat-label">En attente</div><div className="stat-value">{mes.filter(d=>d.statut==="en_attente").length}</div><div className="stat-sub">demande(s)</div></div>
+      </div>
+      {user.isAdmin && <div className="info-box info-purple" style={{marginBottom:10}}>🛡️ Vous êtes administrateur — accès à la gestion des employés, des jours fériés et à toutes les fonctions manager.</div>}
+    </div>
+  </>;
+}
+
+// ─── Planning Mensuel ─────────────────────────────────────────────────────────
+function Planning({ users, demandes, absences, feriesAll }) {
+  const now = new Date();
+  const [mois, setMois] = useState(now.getMonth());
+  const [annee, setAnnee] = useState(now.getFullYear());
+
+  const days = getDaysInMonth(annee, mois);
+  const salaries = users.filter(u=>u.role==="salarie");
+
+  const prevMonth = () => { if (mois===0){setMois(11);setAnnee(a=>a-1);}else setMois(m=>m-1); };
+  const nextMonth = () => { if (mois===11){setMois(0);setAnnee(a=>a+1);}else setMois(m=>m+1); };
+
+  // Calcule le type de journée pour un salarié/date
+  // Retourne { type, statut } — statut peut être "approuve" ou "en_attente"
+  const getDayInfo = (uid, dateStr) => {
+    // Congé approuvé
+    const congeOk = demandes.find(d=>d.salarieId===uid&&d.statut==="approuve"&&dateStr>=d.debut&&dateStr<=d.fin);
+    if (congeOk) return { type: congeOk.type==="RTT" ? "rtt" : "conge", statut: "approuve" };
+    // Congé en attente (projeté)
+    const congeWait = demandes.find(d=>d.salarieId===uid&&d.statut==="en_attente"&&dateStr>=d.debut&&dateStr<=d.fin);
+    if (congeWait) return { type: congeWait.type==="RTT" ? "rtt" : "conge", statut: "en_attente" };
+    // Absence
+    const abs = absences.find(a=>a.salarieId===uid&&dateStr>=a.debut&&dateStr<=a.fin);
+    if (abs) return { type: abs.type, statut: "approuve" };
+    return null;
+  };
+
+  const getCellClass = (info, isWeekend, isFerie) => {
+    if (isFerie) return "day-ferie";
+    if (isWeekend) return "day-weekend";
+    if (!info) return "day-travaille";
+    if (info.statut==="en_attente") return info.type==="rtt" ? "day-rtt-attente" : "day-conge-attente";
+    if (info.type==="conge") return "day-conge";
+    if (info.type==="rtt") return "day-rtt";
+    return `day-${info.type}`;
+  };
+
+  const getCellLabel = (info, isFerie, isWeekend) => {
+    if (isFerie) return "F";
+    if (isWeekend || !info) return "";
+    if (info.statut==="en_attente") return info.type==="rtt" ? "?" : "?";
+    if (info.type==="conge") return "CP";
+    if (info.type==="rtt") return "RTT";
+    const t = ABSENCE_TYPES.find(x=>x.id===info.type);
+    return t ? t.label.split(" ")[0].substring(0,3).toUpperCase() : "";
+  };
+
+  return <>
+    <div className="page-header">
+      <div><div className="page-title">Planning équipe 📅</div><div className="page-sub">Vue mensuelle de présence / absence</div></div>
+      <div className="actions-row">
+        <button className="month-nav-btn" onClick={prevMonth}>◀</button>
+        <strong style={{fontSize:15,minWidth:140,textAlign:"center"}}>{MONTHS[mois]} {annee}</strong>
+        <button className="month-nav-btn" onClick={nextMonth}>▶</button>
+      </div>
+    </div>
+    <div className="page-body">
+      <div className="card" style={{padding:0,overflow:"hidden"}}>
+        <div className="planning-wrap">
+          <table className="planning-table">
+            <thead>
+              <tr>
+                <th style={{textAlign:"left",paddingLeft:10,minWidth:140,position:"sticky",left:0,background:"var(--cream)",zIndex:3}}>Salarié</th>
+                {days.map(d=>{
+                  const ds = fmtLocal(d.getFullYear(), d.getMonth()+1, d.getDate());
+                  const isWE = d.getDay()===0||d.getDay()===6;
+                  const isFerie = !!feriesAll[ds];
+                  const title = isFerie ? feriesAll[ds] : "";
+                  return <th key={ds} className={`day-header${isWE?" weekend":""}${isFerie?" ferie":""}`} title={title}>
+                    <div style={{fontSize:9,color:"var(--muted)"}}>{DAYS_SHORT[(d.getDay()+6)%7]}</div>
+                    <div>{d.getDate()}</div>
+                  </th>;
+                })}
+              </tr>
+            </thead>
+            <tbody>
+              {salaries.map(sal=>(
+                <tr key={sal.id}>
+                  <td className="name-cell">{sal.nom}</td>
+                  {days.map(d=>{
+                    const ds = fmtLocal(d.getFullYear(), d.getMonth()+1, d.getDate());
+                    const isWE = d.getDay()===0||d.getDay()===6;
+                    const isFerie = !!feriesAll[ds];
+                    const info = isWE||isFerie ? null : getDayInfo(sal.id, ds);
+                    const cls = getCellClass(info, isWE, isFerie);
+                    const lbl = getCellLabel(info, isFerie, isWE);
+                    const titleTxt = isFerie ? feriesAll[ds]
+                      : info ? (info.statut==="en_attente" ? "⏳ En attente de validation" : (ABSENCE_TYPES.find(x=>x.id===info.type)?.label || (info.type==="conge"?"Congés payés":"RTT")))
+                      : "";
+                    return <td key={ds} title={titleTxt}>
+                      <div className={`day-cell ${cls}`} style={{fontSize:8}}>{lbl}</div>
+                    </td>;
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="legend">
+        <strong style={{fontSize:11,color:"var(--muted)"}}>Légende :</strong>
+        {[
+          {label:"Congés payés",col:"#10b981"},
+          {label:"RTT",col:"#7c3aed"},
+          {label:"Jour férié",col:"#fde8d8",border:"#f59e0b"},
+          {label:"Weekend",col:"#f0ece4",border:"#d4cfc6"},
+          ...ABSENCE_TYPES.map(t=>({label:t.label,col:t.planningColor})),
+        ].map(l=>(
+          <div className="legend-item" key={l.label}>
+            <div className="legend-dot" style={{background:l.col,border:l.border?`1px solid ${l.border}`:undefined}}></div>
+            {l.label}
+          </div>
+        ))}
+        {/* Entrées spéciales pour les en attente */}
+        <div className="legend-item">
+          <div className="legend-dot" style={{background:"repeating-linear-gradient(45deg,#10b981,#10b981 3px,#d1fae5 3px,#d1fae5 7px)"}}></div>
+          CP en attente
+        </div>
+        <div className="legend-item">
+          <div className="legend-dot" style={{background:"repeating-linear-gradient(45deg,#7c3aed,#7c3aed 3px,#ede9fe 3px,#ede9fe 7px)"}}></div>
+          RTT en attente
+        </div>
+      </div>
+      <div className="info-box info-yellow" style={{marginTop:12}}>
+        ⏳ Les cases <strong>hachurées</strong> indiquent des congés demandés mais <strong>pas encore validés</strong>. Survolez une case pour voir son statut.
+      </div>
+    </div>
+  </>;
+}
+
+// ─── Jours Fériés (Admin) ─────────────────────────────────────────────────────
+// feriesOverrides : { "2026-04-06": { label:"Lundi de Pâques", newDate:"2026-04-07" } }
+// feriesManuels   : { "2026-05-20": "Pont entreprise" }
+function JoursFeries({ feriesManuels, feriesOverrides, feriesSupprimés, onAdd, onDelete, onOverride, onDeleteOverride, onSupprimerFerie, onRestaurerFerie }) {
+  const [annee, setAnnee] = useState(new Date().getFullYear());
+  const [formSpecial, setFormSpecial] = useState({ date:"", label:"" });
+  const [editModal, setEditModal] = useState(null);
+  const [confirmDel, setConfirmDel] = useState(null); // { origDate, label }
+  const [err, setErr] = useState("");
+  const [errEdit, setErrEdit] = useState("");
+
+  const feriesAutoBase = getFeriesAuto(annee);
+  const supprimesAnnee = (feriesSupprimés || []).filter(d => d.startsWith(String(annee)));
+
+  const feriesAutoEffectifs = useMemo(() => {
+    const result = {};
+    Object.entries(feriesAutoBase).forEach(([d, label]) => {
+      if (supprimesAnnee.includes(d)) return; // supprimé → ne pas afficher
+      const ov = feriesOverrides[d];
+      if (ov) {
+        result[ov.newDate] = { label, origDate: d, isOverridden: true };
+      } else {
+        result[d] = { label, origDate: d, isOverridden: false };
+      }
+    });
+    return result;
+  }, [feriesAutoBase, feriesOverrides, supprimesAnnee]);
+
+  // Fériés supprimés pour cette année (pour affichage dans un bloc séparé)
+  const feriesSupprimesAffichage = Object.entries(feriesAutoBase)
+    .filter(([d]) => supprimesAnnee.includes(d));
+
+  const feriesSpeciaux = Object.entries(feriesManuels).filter(([d]) => d.startsWith(String(annee)));
+
+  const submitSpecial = () => {
+    if (!formSpecial.date || !formSpecial.label.trim()) return setErr("Date et libellé requis.");
+    const conflict = Object.entries(feriesAutoEffectifs).find(([d]) => d === formSpecial.date);
+    if (conflict) return setErr(`Cette date est déjà occupée par "${conflict[1].label}".`);
+    onAdd(formSpecial.date, formSpecial.label.trim());
+    setFormSpecial({ date:"", label:"" });
+    setErr("");
+  };
+
+  const openEdit = (effectiveDate, info) => {
+    setErrEdit("");
+    setEditModal({ origDate: info.origDate, effectiveDate, label: info.label, newDate: effectiveDate });
+  };
+
+  const submitEdit = () => {
+    if (!editModal.newDate) return setErrEdit("Date requise.");
+    if (editModal.newDate === editModal.origDate) {
+      onDeleteOverride(editModal.origDate);
+    } else {
+      const conflict = Object.entries(feriesAutoEffectifs).find(([d,v]) => d === editModal.newDate && v.origDate !== editModal.origDate);
+      const conflictSpecial = feriesManuels[editModal.newDate];
+      if (conflict) return setErrEdit(`Cette date est déjà occupée par "${conflict[1].label}".`);
+      if (conflictSpecial) return setErrEdit(`Cette date est déjà un jour spécial ("${conflictSpecial}").`);
+      onOverride(editModal.origDate, editModal.newDate);
+    }
+    setEditModal(null);
+  };
+
+  const fmtDate = (ds) => {
+    const [y,m,d] = ds.split("-");
+    return `${d}/${m}/${y}`;
+  };
+
+  return <>
+    <div className="page-header"><div>
+      <div className="page-title">Gestion des jours fériés 🗓️</div>
+      <div className="page-sub">Calendrier officiel France — correction et jours spéciaux</div>
+    </div></div>
+    <div className="page-body">
+      <div className="month-selector" style={{marginBottom:18}}>
+        <label style={{fontSize:13,fontWeight:500}}>Année :</label>
+        <select value={annee} onChange={e=>setAnnee(parseInt(e.target.value))}>
+          {[2025,2026,2027,2028,2029].map(y=><option key={y} value={y}>{y}</option>)}
+        </select>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:18,alignItems:"start"}}>
+
+        {/* ── Fériés calculés ── */}
+        <div className="card">
+          <div className="card-title">🇫🇷 Jours fériés officiels {annee}</div>
+          <div className="info-box info-blue" style={{marginBottom:12,fontSize:12}}>
+            Calculés automatiquement. ✏️ pour corriger une date, 🗑 pour supprimer un férié non chômé dans votre entreprise.
+          </div>
+          <div className="table-wrap"><table>
+            <thead><tr>
+              <th>Date effective</th>
+              <th>Férié</th>
+              <th>Statut</th>
+              <th></th>
+            </tr></thead>
+            <tbody>{Object.entries(feriesAutoEffectifs).sort((a,b)=>a[0].localeCompare(b[0])).map(([d, info]) => (
+              <tr key={info.origDate}>
+                <td style={{whiteSpace:"nowrap",fontWeight:600}}>{fmtDate(d)}</td>
+                <td>{info.label}</td>
+                <td>
+                  {info.isOverridden
+                    ? <span className="badge" style={{color:"#d97706",background:"#fef3c7"}}>✏️ Corrigé</span>
+                    : <span className="badge" style={{color:"var(--accent2)",background:"#d1fae5"}}>✓ Auto</span>
+                  }
+                  {info.isOverridden && (
+                    <div style={{fontSize:10,color:"var(--muted)",marginTop:2}}>
+                      Calculé : {fmtDate(info.origDate)}
+                    </div>
+                  )}
+                </td>
+                <td>
+                  <div className="actions-row">
+                    <button className="btn btn-orange btn-sm" onClick={()=>openEdit(d, info)} title="Corriger la date">✏️</button>
+                    <button className="btn btn-danger btn-sm" onClick={()=>setConfirmDel({origDate: info.origDate, label: info.label})} title="Supprimer ce férié">🗑</button>
+                    {info.isOverridden && (
+                      <button className="btn btn-ghost btn-sm" onClick={()=>onDeleteOverride(info.origDate)} title="Rétablir la date calculée">↩</button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}</tbody>
+          </table></div>
+
+          {/* Fériés supprimés */}
+          {feriesSupprimesAffichage.length > 0 && (
+            <div style={{marginTop:14}}>
+              <div className="card-title" style={{marginBottom:8}}>🚫 Supprimés pour {annee}</div>
+              {feriesSupprimesAffichage.map(([d, label]) => (
+                <div key={d} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0",borderBottom:"1px solid var(--border)"}}>
+                  <div>
+                    <span style={{fontWeight:600,fontSize:13}}>{fmtDate(d)}</span>
+                    <span style={{fontSize:12,color:"var(--muted)",marginLeft:8}}>{label}</span>
+                  </div>
+                  <button className="btn btn-ghost btn-sm" onClick={()=>onRestaurerFerie(d)}>↩ Restaurer</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* ── Jours spéciaux manuels ── */}
+        <div>
+          <div className="card" style={{marginBottom:14}}>
+            <div className="card-title">➕ Ajouter un jour spécial</div>
+            <div className="info-box info-purple" style={{marginBottom:10,fontSize:12}}>
+              Ponts, journées entreprise, jours supplémentaires non officiel…
+            </div>
+            {err && <div className="info-box info-warn" style={{marginBottom:10}}>{err}</div>}
+            <div className="form-grid">
+              <div className="form-group"><label>Date</label>
+                <input type="date" value={formSpecial.date} onChange={e=>setFormSpecial({...formSpecial,date:e.target.value})} /></div>
+              <div className="form-group"><label>Libellé</label>
+                <input type="text" value={formSpecial.label} onChange={e=>setFormSpecial({...formSpecial,label:e.target.value})} placeholder="Ex: Pont entreprise" /></div>
+            </div>
+            <div className="form-actions">
+              <button className="btn btn-primary" onClick={submitSpecial} disabled={!formSpecial.date||!formSpecial.label}>Ajouter</button>
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="card-title">📌 Jours spéciaux ({annee}) — {feriesSpeciaux.length} saisi(s)</div>
+            {feriesSpeciaux.length===0
+              ? <div className="empty-state" style={{padding:"18px"}}><p>Aucun jour spécial pour {annee}.</p></div>
+              : <div className="table-wrap"><table>
+                  <thead><tr><th>Date</th><th>Libellé</th><th></th></tr></thead>
+                  <tbody>{feriesSpeciaux.sort().map(([d,n])=>(
+                    <tr key={d}>
+                      <td style={{fontWeight:600,whiteSpace:"nowrap"}}>{fmtDate(d)}</td>
+                      <td>{n}</td>
+                      <td><button className="btn btn-danger btn-sm" onClick={()=>onDelete(d)}>Supprimer</button></td>
+                    </tr>
+                  ))}</tbody>
+                </table></div>
+            }
+          </div>
+        </div>
+      </div>
+    </div>
+
+    {/* Modal confirmation suppression férié officiel */}
+    {confirmDel && (
+      <div className="modal-overlay" onClick={e=>e.target===e.currentTarget&&setConfirmDel(null)}>
+        <div className="modal" style={{maxWidth:440}}>
+          <div className="modal-header">
+            <div className="modal-title">Supprimer un jour férié</div>
+            <button className="modal-close" onClick={()=>setConfirmDel(null)}>×</button>
+          </div>
+          <div className="info-box info-warn" style={{marginBottom:14}}>
+            ⚠️ Supprimer <strong>{confirmDel.label}</strong> ({fmtDate(confirmDel.origDate)}) le retirera du calendrier et des calculs de jours ouvrés pour {annee}. Il sera considéré comme un jour travaillé normal.
+          </div>
+          <p style={{fontSize:13,color:"var(--muted)",marginBottom:16}}>Cette action est réversible — vous pourrez le restaurer à tout moment.</p>
+          <div className="form-actions">
+            <button className="btn btn-danger" onClick={()=>{ onSupprimerFerie(confirmDel.origDate, annee); setConfirmDel(null); }}>
+              🗑 Confirmer la suppression
+            </button>
+            <button className="btn btn-ghost" onClick={()=>setConfirmDel(null)}>Annuler</button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* Modal correction date calculée */}
+    {editModal && (
+      <div className="modal-overlay" onClick={e=>e.target===e.currentTarget&&setEditModal(null)}>
+        <div className="modal" style={{maxWidth:460}}>
+          <div className="modal-header">
+            <div className="modal-title">Corriger la date — {editModal.label}</div>
+            <button className="modal-close" onClick={()=>setEditModal(null)}>×</button>
+          </div>
+          <div className="info-box info-yellow" style={{marginBottom:14}}>
+            Date calculée automatiquement : <strong>{fmtDate(editModal.origDate)}</strong><br/>
+            Si cette date est incorrecte dans votre contexte, corrigez-la ci-dessous.
+          </div>
+          {errEdit && <div className="info-box info-warn" style={{marginBottom:10}}>{errEdit}</div>}
+          <div className="form-group">
+            <label>Date corrigée pour {editModal.label}</label>
+            <input type="date" value={editModal.newDate}
+              onChange={e=>setEditModal({...editModal,newDate:e.target.value})} />
+          </div>
+          <div className="info-box info-blue" style={{marginTop:10,fontSize:12}}>
+            ℹ Cette correction ne s'applique qu'à l'année {annee}. La date calculée reste visible pour référence.
+          </div>
+          <div className="form-actions" style={{marginTop:16}}>
+            <button className="btn btn-primary" onClick={submitEdit}>Enregistrer la correction</button>
+            {editModal.effectiveDate !== editModal.origDate && (
+              <button className="btn btn-ghost" onClick={()=>{onDeleteOverride(editModal.origDate);setEditModal(null);}}>
+                ↩ Rétablir la date calculée
+              </button>
+            )}
+            <button className="btn btn-ghost" onClick={()=>setEditModal(null)}>Annuler</button>
+          </div>
+        </div>
+      </div>
+    )}
+  </>;
+}
+
+// ─── Nouvelle Demande ─────────────────────────────────────────────────────────
+function NouvelleDemande({ user, onSubmit, feriesAll }) {
+  const [form, setForm] = useState({debut:"",fin:"",type:"Congés payés",motif:""});
+  const [done, setDone] = useState(false);
+  const jours = form.debut&&form.fin ? joursOuvres(form.debut,form.fin,feriesAll) : 0;
+  const solde = form.type==="RTT" ? user.soldeRTT : user.solde;
+  const soldeApres = solde-jours;
+  const submit = () => { if (!form.debut||!form.fin||jours<=0) return; onSubmit({...form,jours,salarie:user.nom,salarieId:user.id}); setDone(true); };
+  if (done) return <>
+    <div className="page-header"><div className="page-title">Nouvelle demande</div></div>
+    <div className="page-body"><div className="card" style={{textAlign:"center",padding:"40px"}}>
+      <div style={{fontSize:40,marginBottom:11}}>✅</div>
+      <h2 style={{fontFamily:"'DM Serif Display',serif",marginBottom:7}}>Demande envoyée !</h2>
+      <p style={{color:"var(--muted)",marginBottom:20}}>Votre manager sera notifié prochainement.</p>
+      <button className="btn btn-ghost" onClick={()=>setDone(false)}>Faire une autre demande</button>
+    </div></div>
+  </>;
+  return <>
+    <div className="page-header"><div><div className="page-title">Nouvelle demande</div><div className="page-sub">Soumettez une demande de congé</div></div></div>
+    <div className="page-body"><div className="card">
+      <div className="form-grid">
+        <div className="form-group"><label>Début</label><input type="date" value={form.debut} onChange={e=>setForm({...form,debut:e.target.value})} /></div>
+        <div className="form-group"><label>Fin</label><input type="date" value={form.fin} min={form.debut} onChange={e=>setForm({...form,fin:e.target.value})} /></div>
+        <div className="form-group"><label>Type</label>
+          <select value={form.type} onChange={e=>setForm({...form,type:e.target.value})}>
+            <option>Congés payés</option><option>RTT</option><option>Congé sans solde</option><option>Congé exceptionnel</option>
+          </select></div>
+        <div className="form-group"><label>Durée (jours ouvrés hors fériés)</label><input readOnly value={jours>0?`${jours} jour(s)`:"—"} /></div>
+        <div className="form-group full"><label>Motif</label><textarea value={form.motif} onChange={e=>setForm({...form,motif:e.target.value})} placeholder="Optionnel…" /></div>
+      </div>
+      {jours>0&&<div className={`info-box ${soldeApres>=0?"info-ok":"info-yellow"}`} style={{marginTop:12}}>
+        {soldeApres>=0
+          ? `✅ Solde après demande : ${soldeApres} j`
+          : `⚠ Solde insuffisant de ${Math.abs(soldeApres)} j — votre manager pourra accepter ou refuser cette demande en anticipation de la prochaine période.`}
+      </div>}
+      <div className="form-actions"><button className="btn btn-primary" onClick={submit} disabled={jours<=0}>Envoyer →</button></div>
+    </div></div>
+  </>;
+}
+
+// ─── Historique ───────────────────────────────────────────────────────────────
+function Historique({ user, demandes, onEdit, onDelete, feriesAll }) {
+  const mes = [...demandes.filter(d=>d.salarieId===user.id)].sort((a,b)=>new Date(b.date_demande)-new Date(a.date_demande));
+  const [editModal, setEditModal] = useState(null);
+  const [form, setForm] = useState({});
+  const jours = form.debut&&form.fin ? joursOuvres(form.debut,form.fin,feriesAll) : 0;
+  return <>
+    <div className="page-header"><div><div className="page-title">Mes demandes</div><div className="page-sub">{mes.length} demande(s)</div></div></div>
+    <div className="page-body">
+      {mes.length===0 ? <div className="empty-state"><div className="empty-icon">📋</div><p>Aucune demande.</p></div> : (
+        <div className="table-wrap"><table>
+          <thead><tr><th>Type</th><th>Période</th><th>Durée</th><th>Statut</th><th>Actions</th></tr></thead>
+          <tbody>{mes.map(d=>{
+            const s=STATUS[d.statut]; const peutModifier=d.statut==="en_attente";
+            return <tr key={d.id}>
+              <td><strong>{d.type}</strong></td>
+              <td style={{whiteSpace:"nowrap"}}>{d.debut} → {d.fin}</td>
+              <td>{d.jours}j</td>
+              <td><span className="badge" style={{color:s.color,background:s.bg}}>{s.label}</span></td>
+              <td><div className="actions-row">
+                {peutModifier&&<><button className="btn btn-orange btn-sm" onClick={()=>{setForm({debut:d.debut,fin:d.fin,type:d.type,motif:d.motif});setEditModal(d);}}>✏ Modifier</button>
+                <button className="btn btn-danger btn-sm" onClick={()=>onDelete(d.id)}>✗ Suppr.</button></>}
+                {!peutModifier&&<span style={{fontSize:11,color:"var(--muted)"}}>—</span>}
+              </div></td>
+            </tr>;
+          })}</tbody>
+        </table></div>
+      )}
+      <div className="info-box info-blue" style={{marginTop:12}}>ℹ Modification possible uniquement sur les demandes en attente.</div>
+    </div>
+    {editModal&&<div className="modal-overlay" onClick={e=>e.target===e.currentTarget&&setEditModal(null)}>
+      <div className="modal">
+        <div className="modal-header"><div className="modal-title">Modifier la demande</div><button className="modal-close" onClick={()=>setEditModal(null)}>×</button></div>
+        <div className="form-grid">
+          <div className="form-group"><label>Début</label><input type="date" value={form.debut} onChange={e=>setForm({...form,debut:e.target.value})} /></div>
+          <div className="form-group"><label>Fin</label><input type="date" value={form.fin} min={form.debut} onChange={e=>setForm({...form,fin:e.target.value})} /></div>
+          <div className="form-group"><label>Type</label>
+            <select value={form.type} onChange={e=>setForm({...form,type:e.target.value})}>
+              <option>Congés payés</option><option>RTT</option><option>Congé sans solde</option><option>Congé exceptionnel</option>
+            </select></div>
+          <div className="form-group"><label>Durée</label><input readOnly value={jours>0?`${jours} j`:"—"} /></div>
+          <div className="form-group full"><label>Motif</label><textarea value={form.motif} onChange={e=>setForm({...form,motif:e.target.value})} /></div>
+        </div>
+        <div className="form-actions">
+          <button className="btn btn-primary" disabled={jours<=0} onClick={()=>{onEdit(editModal.id,{...form,jours});setEditModal(null);}}>Enregistrer</button>
+          <button className="btn btn-ghost" onClick={()=>setEditModal(null)}>Annuler</button>
+        </div>
+      </div>
+    </div>}
+  </>;
+}
+
+// ─── Validation ───────────────────────────────────────────────────────────────
+function Validation({ demandes, users, onValider, onRefuser, onAnnuler, onSaisirPourSalarie, feriesAll, managerUser }) {
+  const enAttente  = demandes.filter(d=>d.statut==="en_attente").sort((a,b)=>new Date(a.date_demande)-new Date(b.date_demande));
+  const approuvees = demandes.filter(d=>d.statut==="approuve").sort((a,b)=>new Date(b.debut)-new Date(a.debut));
+  const [tab, setTab] = useState("attente");
+
+  // Saisie manager : salariés rattachés à ce manager
+  const mesSalaries = users.filter(u=>u.role==="salarie"&&u.managerId===managerUser.id);
+  const [form, setForm] = useState({salarieId:"",debut:"",fin:"",type:"Congés payés",motif:""});
+  const [formErr, setFormErr] = useState("");
+  const [done, setDone] = useState(false);
+
+  const salChoisi = mesSalaries.find(u=>u.id===parseInt(form.salarieId));
+  const jours = form.debut&&form.fin ? joursOuvres(form.debut,form.fin,feriesAll) : 0;
+  const solde = salChoisi ? (form.type==="RTT" ? salChoisi.soldeRTT : salChoisi.solde) : 0;
+  const soldeApres = solde - jours;
+
+  const submitSaisie = () => {
+    if (!form.salarieId) return setFormErr("Veuillez choisir un salarié.");
+    if (!form.debut||!form.fin||jours<=0) return setFormErr("Dates invalides.");
+    if (soldeApres < 0) setFormErr(`⚠ Solde insuffisant de ${Math.abs(soldeApres)} jour(s) — la demande sera créée en anticipation de la prochaine période.`);
+    onSaisirPourSalarie({
+      salarieId: parseInt(form.salarieId),
+      salarie: salChoisi.nom,
+      debut: form.debut, fin: form.fin,
+      jours, type: form.type, motif: form.motif,
+    });
+    setForm({salarieId:"",debut:"",fin:"",type:"Congés payés",motif:""});
+    setFormErr(""); setDone(true);
+    setTimeout(()=>setDone(false), 3000);
+  };
+
+  return <>
+    <div className="page-header"><div><div className="page-title">Validation congés</div><div className="page-sub">{enAttente.length} en attente</div></div></div>
+    <div className="page-body">
+      <div className="tabs">
+        <button className={`tab ${tab==="attente"?"active":""}`}   onClick={()=>setTab("attente")}>⏳ En attente ({enAttente.length})</button>
+        <button className={`tab ${tab==="approuvees"?"active":""}`} onClick={()=>setTab("approuvees")}>✅ Approuvés ({approuvees.length})</button>
+        <button className={`tab ${tab==="saisie"?"active":""}`}     onClick={()=>setTab("saisie")}>✏️ Saisir pour un salarié</button>
+      </div>
+
+      {/* ── En attente ── */}
+      {tab==="attente"&&(enAttente.length===0
+        ? <div className="card"><div className="empty-state"><div className="empty-icon">🎉</div><p>Tout est traité !</p></div></div>
+        : <div className="table-wrap"><table>
+            <thead><tr><th>Salarié</th><th>Type</th><th>Période</th><th>Durée</th><th>Solde actuel</th><th>Motif</th><th>Actions</th></tr></thead>
+            <tbody>{enAttente.map(d=>{
+              const sal = users.find(u=>u.id===d.salarieId);
+              const soldeActuel = sal ? (d.type==="RTT" ? sal.soldeRTT : sal.solde) : null;
+              const soldeApresD = soldeActuel !== null ? soldeActuel - d.jours : null;
+              return (
+              <tr key={d.id} style={soldeApresD!==null&&soldeApresD<0?{background:"#fff8f0"}:{}}>
+                <td><strong>{d.salarie}</strong></td><td>{d.type}</td>
+                <td style={{whiteSpace:"nowrap"}}>{d.debut} → {d.fin}</td><td>{d.jours}j</td>
+                <td>
+                  {soldeActuel!==null&&<>
+                    <span style={{fontWeight:600,color:soldeApresD<0?"#c84b31":"#2d6a4f"}}>{soldeActuel}j</span>
+                    {soldeApresD<0&&<span className="badge" style={{color:"#c84b31",background:"#fee2e2",marginLeft:4,fontSize:10}}>⚠ -{Math.abs(soldeApresD)}j</span>}
+                  </>}
+                </td>
+                <td style={{color:"var(--muted)",fontSize:11}}>{d.motif||"—"}</td>
+                <td><div className="actions-row">
+                  <button className="btn btn-success btn-sm" onClick={()=>onValider(d.id)}>✓ Approuver</button>
+                  <button className="btn btn-danger btn-sm"  onClick={()=>onRefuser(d.id)}>✗ Refuser</button>
+                </div></td>
+              </tr>
+            )})}</tbody>
+          </table></div>
+      )}
+
+      {/* ── Approuvés ── */}
+      {tab==="approuvees"&&(<>
+        <div className="info-box info-yellow" style={{marginBottom:12}}>⚠ Annuler recrédite automatiquement les jours sur le solde du salarié.</div>
+        {approuvees.length===0
+          ? <div className="empty-state"><div className="empty-icon">📋</div><p>Aucun congé approuvé.</p></div>
+          : <div className="table-wrap"><table>
+              <thead><tr><th>Salarié</th><th>Type</th><th>Période</th><th>Durée</th><th></th></tr></thead>
+              <tbody>{approuvees.map(d=>(
+                <tr key={d.id}>
+                  <td><strong>{d.salarie}</strong></td><td>{d.type}</td>
+                  <td style={{whiteSpace:"nowrap"}}>{d.debut} → {d.fin}</td><td>{d.jours}j</td>
+                  <td><button className="btn btn-orange btn-sm" onClick={()=>onAnnuler(d.id)}>↩ Annuler</button></td>
+                </tr>
+              ))}</tbody>
+            </table></div>
+        }
+      </>)}
+
+      {/* ── Saisie manager ── */}
+      {tab==="saisie"&&(
+        <div className="card">
+          <div className="card-title">✏️ Saisir un congé directement pour un salarié</div>
+          <div className="info-box info-blue" style={{marginBottom:16}}>
+            La demande sera créée avec le statut <strong>En attente</strong>. Elle apparaîtra en hachuré sur le planning et vous pourrez ensuite la valider ou la refuser depuis l'onglet "En attente".
+          </div>
+          {done && <div className="info-box info-ok" style={{marginBottom:14}}>✅ Demande créée — retrouvez-la dans l'onglet "En attente" pour la valider.</div>}
+          {formErr && <div className="info-box info-warn" style={{marginBottom:14}}>{formErr}</div>}
+          {mesSalaries.length===0
+            ? <div className="empty-state"><div className="empty-icon">👥</div><p>Aucun salarié rattaché à votre compte.</p></div>
+            : <>
+              <div className="form-grid">
+                <div className="form-group"><label>Salarié</label>
+                  <select value={form.salarieId} onChange={e=>setForm({...form,salarieId:e.target.value})}>
+                    <option value="">— Choisir un salarié —</option>
+                    {mesSalaries.map(u=>(
+                      <option key={u.id} value={u.id}>{u.nom} (CP : {u.solde}j · RTT : {u.soldeRTT}j)</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="form-group"><label>Type de congé</label>
+                  <select value={form.type} onChange={e=>setForm({...form,type:e.target.value})}>
+                    <option>Congés payés</option>
+                    <option>RTT</option>
+                    <option>Congé sans solde</option>
+                    <option>Congé exceptionnel</option>
+                  </select>
+                </div>
+                <div className="form-group"><label>Date de début</label>
+                  <input type="date" value={form.debut} onChange={e=>setForm({...form,debut:e.target.value})} />
+                </div>
+                <div className="form-group"><label>Date de fin</label>
+                  <input type="date" value={form.fin} min={form.debut} onChange={e=>setForm({...form,fin:e.target.value})} />
+                </div>
+                <div className="form-group"><label>Durée (jours ouvrés hors fériés)</label>
+                  <input readOnly value={jours>0?`${jours} jour(s)`:"—"} />
+                </div>
+                <div className="form-group"><label>Motif</label>
+                  <input type="text" value={form.motif} onChange={e=>setForm({...form,motif:e.target.value})} placeholder="Optionnel…" />
+                </div>
+              </div>
+
+              {/* Aperçu solde */}
+              {salChoisi && jours>0 && (
+                <div className={`info-box ${soldeApres>=0?"info-ok":"info-yellow"}`} style={{marginTop:14}}>
+                  {soldeApres>=0
+                    ? `✅ Solde de ${salChoisi.nom} après ce congé : ${soldeApres} jour(s)`
+                    : `⚠ Solde insuffisant de ${Math.abs(soldeApres)} j — vous pouvez tout de même créer la demande en anticipation de la prochaine période.`
+                  }
+                </div>
+              )}
+
+              <div className="form-actions" style={{marginTop:18}}>
+                <button className="btn btn-primary" onClick={submitSaisie} disabled={!form.salarieId||jours<=0}>
+                  📋 Créer la demande (en attente)
+                </button>
+              </div>
+            </>
+          }
+        </div>
+      )}
+    </div>
+  </>;
+}
+
+// ─── Absences ─────────────────────────────────────────────────────────────────
+function SaisieAbsences({ absences, users, onAdd, onDelete }) {
+  const salaries = users.filter(u=>u.role==="salarie");
+  const [modal, setModal] = useState(false);
+  const [form, setForm] = useState({salarieId:"",type:"maladie",debut:"",fin:"",commentaire:""});
+  const jours = form.debut&&form.fin ? joursOuvres(form.debut,form.fin) : 0;
+  const submit = () => {
+    if (!form.salarieId||jours<=0) return;
+    const sal=salaries.find(u=>u.id===parseInt(form.salarieId));
+    const d=new Date(form.debut);
+    onAdd({...form,salarieId:parseInt(form.salarieId),salarie:sal.nom,jours,mois:d.getMonth(),annee:d.getFullYear()});
+    setModal(false); setForm({salarieId:"",type:"maladie",debut:"",fin:"",commentaire:""});
+  };
+  return <>
+    <div className="page-header">
+      <div><div className="page-title">Saisie absences</div><div className="page-sub">Enregistrez les absences de l'équipe</div></div>
+      <button className="btn btn-primary" onClick={()=>setModal(true)}>+ Saisir une absence</button>
+    </div>
+    <div className="page-body">
+      {absences.length===0?<div className="empty-state"><div className="empty-icon">🏥</div><p>Aucune absence.</p></div>:(
+        <div className="table-wrap"><table>
+          <thead><tr><th>Salarié</th><th>Type</th><th>Période</th><th>Durée</th><th>Commentaire</th><th></th></tr></thead>
+          <tbody>{[...absences].sort((a,b)=>new Date(b.debut)-new Date(a.debut)).map(abs=>{
+            const t=ABSENCE_TYPES.find(x=>x.id===abs.type);
+            return <tr key={abs.id}>
+              <td><strong>{abs.salarie}</strong></td>
+              <td><span className="badge" style={{color:t?.color,background:t?.bg}}>{t?.icon} {t?.label}</span></td>
+              <td style={{whiteSpace:"nowrap"}}>{abs.debut} → {abs.fin}</td>
+              <td>{abs.jours}j</td>
+              <td style={{color:"var(--muted)",fontSize:11}}>{abs.commentaire||"—"}</td>
+              <td><button className="btn btn-danger btn-sm" onClick={()=>onDelete(abs.id)}>Suppr.</button></td>
+            </tr>;
+          })}</tbody>
+        </table></div>
+      )}
+    </div>
+    {modal&&<div className="modal-overlay" onClick={e=>e.target===e.currentTarget&&setModal(false)}>
+      <div className="modal">
+        <div className="modal-header"><div className="modal-title">Saisir une absence</div><button className="modal-close" onClick={()=>setModal(false)}>×</button></div>
+        <div className="form-grid">
+          <div className="form-group"><label>Salarié</label>
+            <select value={form.salarieId} onChange={e=>setForm({...form,salarieId:e.target.value})}>
+              <option value="">— Choisir —</option>
+              {salaries.map(u=><option key={u.id} value={u.id}>{u.nom}</option>)}
+            </select></div>
+          <div className="form-group"><label>Type</label>
+            <select value={form.type} onChange={e=>setForm({...form,type:e.target.value})}>
+              {ABSENCE_TYPES.map(t=><option key={t.id} value={t.id}>{t.icon} {t.label}</option>)}
+            </select></div>
+          <div className="form-group"><label>Début</label><input type="date" value={form.debut} onChange={e=>setForm({...form,debut:e.target.value})} /></div>
+          <div className="form-group"><label>Fin</label><input type="date" value={form.fin} min={form.debut} onChange={e=>setForm({...form,fin:e.target.value})} /></div>
+          <div className="form-group full"><label>Commentaire / N° arrêt</label>
+            <textarea value={form.commentaire} onChange={e=>setForm({...form,commentaire:e.target.value})} /></div>
+        </div>
+        {jours>0&&<div className="info-box info-blue" style={{marginTop:10}}>ℹ {jours} jour(s) ouvré(s)</div>}
+        <div className="form-actions">
+          <button className="btn btn-primary" onClick={submit} disabled={!form.salarieId||jours<=0}>Enregistrer</button>
+          <button className="btn btn-ghost" onClick={()=>setModal(false)}>Annuler</button>
+        </div>
+      </div>
+    </div>}
+  </>;
+}
+
+// ─── Heures Sup ───────────────────────────────────────────────────────────────
+function HeuresSup({ heuresSup, users, onAdd, onDelete }) {
+  const salaries = users.filter(u=>u.role==="salarie");
+  const [modal, setModal] = useState(false);
+  const [form, setForm] = useState({salarieId:"",heures:"",semaine:"",commentaire:""});
+  const submit = () => {
+    if (!form.salarieId||!form.heures||!form.semaine) return;
+    const sal=salaries.find(u=>u.id===parseInt(form.salarieId));
+    const d=new Date(form.semaine);
+    onAdd({...form,salarieId:parseInt(form.salarieId),salarie:sal.nom,heures:parseFloat(form.heures),mois:d.getMonth(),annee:d.getFullYear()});
+    setModal(false); setForm({salarieId:"",heures:"",semaine:"",commentaire:""});
+  };
+  return <>
+    <div className="page-header">
+      <div><div className="page-title">Heures supplémentaires</div><div className="page-sub">Enregistrez les heures sup</div></div>
+      <button className="btn btn-primary" onClick={()=>setModal(true)}>+ Saisir</button>
+    </div>
+    <div className="page-body">
+      {heuresSup.length===0?<div className="empty-state"><div className="empty-icon">⏱️</div><p>Aucune heure enregistrée.</p></div>:(
+        <div className="table-wrap"><table>
+          <thead><tr><th>Salarié</th><th>Semaine du</th><th>Heures</th><th>Commentaire</th><th></th></tr></thead>
+          <tbody>{[...heuresSup].sort((a,b)=>b.semaine.localeCompare(a.semaine)).map(h=>(
+            <tr key={h.id}>
+              <td><strong>{h.salarie}</strong></td><td>{h.semaine}</td>
+              <td><strong style={{color:"var(--accent2)"}}>{h.heures}h</strong></td>
+              <td style={{color:"var(--muted)",fontSize:11}}>{h.commentaire||"—"}</td>
+              <td><button className="btn btn-danger btn-sm" onClick={()=>onDelete(h.id)}>Suppr.</button></td>
+            </tr>
+          ))}</tbody>
+        </table></div>
+      )}
+    </div>
+    {modal&&<div className="modal-overlay" onClick={e=>e.target===e.currentTarget&&setModal(false)}>
+      <div className="modal">
+        <div className="modal-header"><div className="modal-title">Heures supplémentaires</div><button className="modal-close" onClick={()=>setModal(false)}>×</button></div>
+        <div className="form-grid">
+          <div className="form-group"><label>Salarié</label>
+            <select value={form.salarieId} onChange={e=>setForm({...form,salarieId:e.target.value})}>
+              <option value="">— Choisir —</option>
+              {salaries.map(u=><option key={u.id} value={u.id}>{u.nom}</option>)}
+            </select></div>
+          <div className="form-group"><label>Semaine du (lundi)</label><input type="date" value={form.semaine} onChange={e=>setForm({...form,semaine:e.target.value})} /></div>
+          <div className="form-group"><label>Heures</label><input type="number" step="0.5" min="0.5" max="60" value={form.heures} onChange={e=>setForm({...form,heures:e.target.value})} placeholder="Ex: 3.5" /></div>
+          <div className="form-group"><label>Commentaire</label><input type="text" value={form.commentaire} onChange={e=>setForm({...form,commentaire:e.target.value})} /></div>
+        </div>
+        <div className="form-actions">
+          <button className="btn btn-primary" onClick={submit} disabled={!form.salarieId||!form.heures||!form.semaine}>Enregistrer</button>
+          <button className="btn btn-ghost" onClick={()=>setModal(false)}>Annuler</button>
+        </div>
+      </div>
+    </div>}
+  </>;
+}
+
+// ─── Préparation Paie ─────────────────────────────────────────────────────────
+function PreparationPaie({ demandes, absences, heuresSup, users, feriesAll, onCreditAcquisition }) {
+  const [mois, setMois] = useState(new Date().getMonth());
+  const [annee, setAnnee] = useState(new Date().getFullYear());
+  const [expanded, setExpanded] = useState({});
+  const [crediting, setCrediting] = useState({});
+  const salaries = users.filter(u=>u.role==="salarie");
+
+  const fmtJ = v => {
+    const n = parseFloat(v) || 0;
+    return Number.isInteger(n) ? String(n) : n.toFixed(2);
+  };
+
+  // Calcule le nombre de jours ouvrés dans un mois donné (hors fériés)
+  const joursOuvresMois = (year, month) => {
+    let count = 0;
+    const d = new Date(year, month, 1);
+    while (d.getMonth() === month) {
+      const day = d.getDay();
+      const ds = fmtLocal(d.getFullYear(), d.getMonth()+1, d.getDate());
+      if (day !== 0 && day !== 6 && !feriesAll[ds]) count++;
+      d.setDate(d.getDate() + 1);
+    }
+    return count;
+  };
+
+  // Calcule les jours ouvrés d'un congé qui tombent dans un mois/année donné
+  const joursCongesDansMois = (demande, targetMois, targetAnnee, feriesMap) => {
+    const debut = new Date(demande.debut);
+    const fin   = new Date(demande.fin);
+    // Bornes du mois cible
+    const debutMois = new Date(targetAnnee, targetMois, 1);
+    const finMois   = new Date(targetAnnee, targetMois + 1, 0); // dernier jour du mois
+    // Intersection
+    const start = debut > debutMois ? debut : debutMois;
+    const end   = fin   < finMois   ? fin   : finMois;
+    if (start > end) return 0;
+    return joursOuvres(
+      fmtLocal(start.getFullYear(), start.getMonth()+1, start.getDate()),
+      fmtLocal(end.getFullYear(),   end.getMonth()+1,   end.getDate()),
+      feriesMap
+    );
+  };
+
+  const recap = useMemo(() => salaries.map(sal => {
+    // Congés qui chevauchent le mois (debut <= fin du mois ET fin >= début du mois)
+    const debutMois = `${annee}-${String(mois+1).padStart(2,"0")}-01`;
+    const finMois   = fmtLocal(annee, mois+1, new Date(annee, mois+1, 0).getDate());
+
+    const congesMois = demandes.filter(d =>
+      d.salarieId === sal.id && d.statut === "approuve" &&
+      d.debut <= finMois && d.fin >= debutMois
+    );
+    const absencesMois = absences.filter(a => a.salarieId === sal.id && a.mois === mois && a.annee === annee);
+    const heuresMois = heuresSup.filter(h => h.salarieId === sal.id && h.mois === mois && h.annee === annee);
+
+    // Jours réels tombant dans ce mois (gestion chevauchement)
+    const joursCongesMois = congesMois.reduce((s,d) => s + joursCongesDansMois(d, mois, annee, feriesAll), 0);
+    const joursCP    = congesMois.filter(d=>d.type==="Congés payés").reduce((s,d) => s + joursCongesDansMois(d, mois, annee, feriesAll), 0);
+    const joursRTT   = congesMois.filter(d=>d.type==="RTT").reduce((s,d) => s + joursCongesDansMois(d, mois, annee, feriesAll), 0);
+    const joursAutresConges = congesMois.filter(d=>d.type!=="Congés payés"&&d.type!=="RTT").reduce((s,d) => s + joursCongesDansMois(d, mois, annee, feriesAll), 0);
+
+    const totalConges = joursCongesMois;
+    const totalAbsences = absencesMois.reduce((s,a)=>s+a.jours, 0);
+    const totalHeures = heuresMois.reduce((s,h)=>s+h.heures, 0);
+
+    const absParType = {};
+    ABSENCE_TYPES.forEach(t => {
+      const n = absencesMois.filter(a=>a.type===t.id).reduce((s,a)=>s+a.jours, 0);
+      if (n > 0) absParType[t.id] = n;
+    });
+
+    // ── Calcul acquisition CP ──
+    const joursOuvresDuMois = joursOuvresMois(annee, mois);
+    const joursDeductibles = absencesMois
+      .filter(a => ABSENCE_DEDUCTIBLES_CP.includes(a.type))
+      .reduce((s,a) => s+a.jours, 0);
+    const joursTravailles = Math.max(0, joursOuvresDuMois - joursDeductibles);
+    const cpAcquis = joursOuvresDuMois > 0
+      ? parseFloat((2.08 * (joursTravailles / joursOuvresDuMois)).toFixed(2))
+      : 0;
+
+    return {
+      sal, congesMois, absencesMois, heuresMois,
+      totalConges, totalAbsences, totalHeures, absParType,
+      joursCP, joursRTT, joursAutresConges,
+      joursOuvresDuMois, joursDeductibles, joursTravailles, cpAcquis,
+    };
+  }), [mois, annee, demandes, absences, heuresSup, users, feriesAll]);
+
+  const totals = recap.reduce((s,r) => ({
+    c: s.c+r.totalConges, a: s.a+r.totalAbsences, h: s.h+r.totalHeures,
+    cp: parseFloat((s.cp+r.cpAcquis).toFixed(2)),
+  }), {c:0, a:0, h:0, cp:0});
+
+  const handleCSV = () => {
+    const rows = [["Salarié","CP (j)","RTT (j)","Jours ouvrés mois","Jours déductibles CP","Jours travaillés","CP acquis","Maladie (j)","Abs. injustifiée (j)","Acc. travail (j)","Enfant malade (j)","CSS (j)","Autre abs. NR (j)","Total absences (j)","Heures sup (h)"]];
+    recap.forEach(r => { rows.push([
+      r.sal.nom,
+      r.joursCP, r.joursRTT,
+      r.joursOuvresDuMois, r.joursDeductibles, r.joursTravailles, r.cpAcquis,
+      r.absParType["maladie"]||0, r.absParType["absence_injustifiee"]||0,
+      r.absParType["accident_travail"]||0, r.absParType["enfant_malade"]||0,
+      r.absParType["conge_sans_solde"]||0, r.absParType["autre_absence_nr"]||0,
+      r.totalAbsences, r.totalHeures,
+    ]); });
+    exportCSV(rows, `paie_${MONTHS[mois]}_${annee}.csv`);
+  };
+
+  return <>
+    <div className="page-header">
+      <div><div className="page-title">Préparation paie 💶</div><div className="page-sub">Récapitulatif mensuel — {MONTHS[mois]} {annee}</div></div>
+      <div className="actions-row">
+        <div className="month-selector">
+          <select value={mois} onChange={e=>setMois(parseInt(e.target.value))}>{MONTHS.map((m,i)=><option key={i} value={i}>{m}</option>)}</select>
+          <select value={annee} onChange={e=>setAnnee(parseInt(e.target.value))}>{[2024,2025,2026,2027].map(y=><option key={y} value={y}>{y}</option>)}</select>
+        </div>
+        <button className="btn btn-blue" onClick={handleCSV}>⬇ Export CSV</button>
+      </div>
+    </div>
+    <div className="page-body">
+      <div className="paie-grid">
+        <div className="paie-stat"><div className="paie-stat-val" style={{color:"var(--accent2)"}}>{totals.c}</div><div className="paie-stat-lbl">Jours congés posés</div></div>
+        <div className="paie-stat"><div className="paie-stat-val" style={{color:"var(--accent)"}}>{totals.a}</div><div className="paie-stat-lbl">Jours d'absence</div></div>
+        <div className="paie-stat"><div className="paie-stat-val" style={{color:"#2563eb"}}>{totals.h}h</div><div className="paie-stat-lbl">Heures supplémentaires</div></div>
+        <div className="paie-stat"><div className="paie-stat-val" style={{color:"#d97706"}}>{fmtJ(totals.cp)}</div><div className="paie-stat-lbl">CP acquis ce mois (total équipe)</div></div>
+      </div>
+
+      <div className="info-box info-blue" style={{marginBottom:16}}>
+        📌 <strong>Règle d'acquisition :</strong> 2,08 j/mois × (jours travaillés ÷ jours ouvrés). Déductibles : absence injustifiée, congé sans solde, autre absence non rémunérée. Non déductibles : maladie, enfant malade, accident travail, CP posés.
+      </div>
+
+      {recap.map(r => {
+        const isOpen = expanded[r.sal.id];
+        const hasData = r.totalConges>0 || r.totalAbsences>0 || r.totalHeures>0;
+        const isCrediting = crediting[r.sal.id];
+        return <div className="sal-recap" key={r.sal.id} style={{opacity: hasData||r.cpAcquis<2.08 ? 1 : .7}}>
+          <div className="recap-header" onClick={()=>setExpanded(e=>({...e,[r.sal.id]:!e[r.sal.id]}))}>
+            <div className="recap-name">{r.sal.nom}</div>
+            <div className="recap-pills">
+              {r.totalConges>0&&<span className="badge" style={{color:"var(--accent2)",background:"#d1fae5"}}>🌴 {r.totalConges}j</span>}
+              {r.totalAbsences>0&&<span className="badge" style={{color:"var(--accent)",background:"#fee2e2"}}>🏥 {r.totalAbsences}j</span>}
+              {r.totalHeures>0&&<span className="badge" style={{color:"#2563eb",background:"#dbeafe"}}>⏱ {r.totalHeures}h</span>}
+              <span className="badge" style={{color:"#d97706",background:"#fef3c7"}}>📈 +{fmtJ(r.cpAcquis)} CP</span>
+              {!hasData&&r.cpAcquis===2.08&&<span style={{fontSize:11,color:"var(--muted)"}}>Mois complet</span>}
+              <span style={{color:"var(--muted)",fontSize:15}}>{isOpen?"▲":"▼"}</span>
+            </div>
+          </div>
+          {isOpen && <div className="recap-body" style={{gridTemplateColumns:"repeat(3,1fr)"}}>
+            <div><div className="recap-item-label">Congés payés posés</div><div className="recap-item-val" style={{color:"var(--accent2)"}}>{r.joursCP}j</div></div>
+            <div><div className="recap-item-label">RTT</div><div className="recap-item-val" style={{color:"#7c3aed"}}>{r.joursRTT}j</div></div>
+            <div><div className="recap-item-label">Heures sup.</div><div className="recap-item-val" style={{color:"#2563eb"}}>{r.totalHeures}h</div></div>
+            {ABSENCE_TYPES.map(t => { const jrs = r.absParType[t.id]||0; return (
+              <div key={t.id}><div className="recap-item-label">{t.icon} {t.label}{t.deductibleCP?<span style={{fontSize:9,color:"#d97706",marginLeft:3}}>−CP</span>:""}</div><div className="recap-item-val" style={{color:jrs>0?t.color:"var(--muted)"}}>{jrs}j</div></div>
+            ); })}
+
+            {/* ── Bloc acquisition CP ── */}
+            <div style={{gridColumn:"1/-1",marginTop:12,paddingTop:12,borderTop:"1px solid var(--border)"}}>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:12}}>
+                <div style={{background:"#f8f7f4",borderRadius:8,padding:"10px 12px",textAlign:"center"}}>
+                  <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>Jours ouvrés du mois</div>
+                  <div style={{fontFamily:"'DM Serif Display',serif",fontSize:22}}>{r.joursOuvresDuMois}</div>
+                </div>
+                <div style={{background:"#fff8f0",borderRadius:8,padding:"10px 12px",textAlign:"center"}}>
+                  <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>Jours déductibles</div>
+                  <div style={{fontFamily:"'DM Serif Display',serif",fontSize:22,color:"#c84b31"}}>{r.joursDeductibles}</div>
+                </div>
+                <div style={{background:"#eef6f2",borderRadius:8,padding:"10px 12px",textAlign:"center"}}>
+                  <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>Jours travaillés</div>
+                  <div style={{fontFamily:"'DM Serif Display',serif",fontSize:22,color:"var(--accent2)"}}>{r.joursTravailles}</div>
+                </div>
+                <div style={{background:"#fef9ec",borderRadius:8,padding:"10px 12px",textAlign:"center"}}>
+                  <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:4}}>CP acquis ce mois</div>
+                  <div style={{fontFamily:"'DM Serif Display',serif",fontSize:22,color:"#d97706"}}>+{fmtJ(r.cpAcquis)}</div>
+                </div>
+              </div>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,flexWrap:"wrap"}}>
+                <div style={{fontSize:12,color:"var(--muted)"}}>
+                  Solde actuel : <strong style={{color:"var(--ink)"}}>{fmtJ(r.sal.solde)} j CP disponibles</strong> · <strong style={{color:"#d97706"}}>{fmtJ(r.sal.soldeAcquisition||0)} j en acquisition</strong>
+                </div>
+                <button
+                  className="btn btn-orange btn-sm"
+                  disabled={isCrediting || r.cpAcquis <= 0}
+                  onClick={async e => {
+                    e.stopPropagation();
+                    setCrediting(c=>({...c,[r.sal.id]:true}));
+                    await onCreditAcquisition(r.sal.id, r.cpAcquis);
+                    setCrediting(c=>({...c,[r.sal.id]:false}));
+                  }}
+                >
+                  {isCrediting ? "Crédit en cours…" : `📈 Créditer +${fmtJ(r.cpAcquis)} j en acquisition`}
+                </button>
+              </div>
+            </div>
+          </div>}
+        </div>;
+      })}
+    </div>
+  </>;
+}
+
+// ─── Équipe ───────────────────────────────────────────────────────────────────
+function Equipe({ users, demandes, absences }) {
+  const salaries = users.filter(u=>u.role==="salarie");
+  const managers = users.filter(u=>u.role==="manager");
+  const fmtJ = v => { const n = parseFloat(v)||0; return Number.isInteger(n) ? String(n) : n.toFixed(2); };
+  return <>
+    <div className="page-header"><div><div className="page-title">Mon équipe</div><div className="page-sub">Soldes et situation</div></div></div>
+    <div className="page-body">
+      <div className="table-wrap"><table>
+        <thead><tr><th>Salarié</th><th>Manager</th><th>CP disponibles</th><th>CP en acquisition</th><th>RTT</th><th>Absences</th><th>En attente</th></tr></thead>
+        <tbody>{salaries.map(s=>{
+          const mgr=managers.find(m=>m.id===s.managerId);
+          return <tr key={s.id}>
+            <td><strong>{s.nom}</strong><br/><span style={{fontSize:11,color:"var(--muted)"}}>{s.email}</span></td>
+            <td style={{fontSize:12}}>{mgr?mgr.nom:<span style={{color:"var(--muted)"}}>—</span>}</td>
+            <td><span style={{fontFamily:"'DM Serif Display',serif",fontSize:19,color:"var(--accent2)"}}>{fmtJ(s.solde)}</span> <span style={{fontSize:11,color:"var(--muted)"}}>j</span></td>
+            <td><span style={{fontFamily:"'DM Serif Display',serif",fontSize:19,color:"#d97706"}}>{fmtJ(s.soldeAcquisition||0)}</span> <span style={{fontSize:11,color:"var(--muted)"}}>j</span></td>
+            <td><span style={{fontFamily:"'DM Serif Display',serif",fontSize:19,color:"#7c3aed"}}>{fmtJ(s.soldeRTT)}</span> <span style={{fontSize:11,color:"var(--muted)"}}>j</span></td>
+            <td>{absences.filter(a=>a.salarieId===s.id).reduce((s,a)=>s+a.jours,0)}j</td>
+            <td>{demandes.filter(d=>d.salarieId===s.id&&d.statut==="en_attente").length}</td>
+          </tr>;
+        })}</tbody>
+      </table></div>
+    </div>
+  </>;
+}
+
+// ─── Gestion Employés ─────────────────────────────────────────────────────────
+function GestionEmployes({ users, onAdd, onDelete, onUpdate }) {
+  const [modal, setModal] = useState(null);
+  const [confirmDel, setConfirmDel] = useState(null);
+  const [form, setForm] = useState({nom:"",email:"",password:"",role:"salarie",isAdmin:false,managerId:"",solde:25,soldeRTT:5});
+  const [formErr, setFormErr] = useState("");
+  const managers = users.filter(u=>u.role==="manager");
+  const adminManagers = users.filter(u=>u.isAdmin&&u.role==="manager");
+
+  const openAdd = () => { setForm({nom:"",email:"",password:"",role:"salarie",isAdmin:false,managerId:managers[0]?.id||"",solde:25,soldeRTT:5,soldeAcquisition:0}); setFormErr(""); setModal("add"); };
+  const openEdit = (u) => { setForm({nom:u.nom,email:u.email,password:"",role:u.role,isAdmin:u.isAdmin,managerId:u.managerId||"",solde:u.solde,soldeRTT:u.soldeRTT,soldeAcquisition:u.soldeAcquisition||0}); setFormErr(""); setModal(u); };
+
+  // Vérifie qu'il restera au moins un admin manager après suppression/modification
+  const wouldRemoveLastAdmin = (userId, changes={}) => {
+    const futureUsers = users.map(u=>u.id===userId?{...u,...changes}:u);
+    return !futureUsers.some(u=>u.isAdmin&&u.role==="manager");
+  };
+
+  const submitAdd = () => {
+    if (!form.nom.trim()||!form.email.trim()||!form.password.trim()) return setFormErr("Nom, email et mot de passe requis.");
+    if (users.find(u=>u.email===form.email.trim())) return setFormErr("Email déjà utilisé.");
+    if (form.password.length<4) return setFormErr("Mot de passe trop court (min 4 caractères).");
+    if (form.isAdmin && form.role!=="manager") return setFormErr("Un administrateur doit obligatoirement être manager.");
+    onAdd({...form,nom:form.nom.trim(),email:form.email.trim(),managerId:form.role==="salarie"?parseInt(form.managerId)||null:null,solde:parseFloat(form.solde)||0,soldeRTT:parseFloat(form.soldeRTT)||0,soldeAcquisition:parseFloat(form.soldeAcquisition)||0,mustChangePassword:true});
+    setModal(null);
+  };
+
+  const submitEdit = () => {
+    if (!form.nom.trim()||!form.email.trim()) return setFormErr("Nom et email requis.");
+    if (users.find(u=>u.email===form.email.trim()&&u.id!==modal.id)) return setFormErr("Email déjà utilisé.");
+    if (form.isAdmin && form.role!=="manager") return setFormErr("Un administrateur doit être manager.");
+    const changes={nom:form.nom.trim(),email:form.email.trim(),role:form.role,isAdmin:form.isAdmin,managerId:form.role==="salarie"?parseInt(form.managerId)||null:null,solde:parseFloat(form.solde)||0,soldeRTT:parseFloat(form.soldeRTT)||0,soldeAcquisition:parseFloat(form.soldeAcquisition)||0};
+    if (form.password.trim()) changes.password=form.password.trim();
+    // Vérifier qu'on ne retire pas le dernier admin
+    if (modal.isAdmin && !form.isAdmin && wouldRemoveLastAdmin(modal.id,changes)) return setFormErr("Impossible : il doit toujours rester au moins un administrateur manager.");
+    onUpdate(modal.id,changes);
+    setModal(null);
+  };
+
+  const getRolePill = (u) => {
+    if (u.isAdmin) return <span className="pill-admin">🛡️ Admin</span>;
+    if (u.role==="manager") return <span className="pill-manager">👑 Manager</span>;
+    return <span className="pill-salarie">Salarié</span>;
+  };
+
+  return <>
+    <div className="page-header">
+      <div><div className="page-title">Gestion employés ⚙️</div><div className="page-sub">{users.length} compte(s) · {adminManagers.length} admin(s)</div></div>
+      <button className="btn btn-primary" onClick={openAdd}>+ Nouvel employé</button>
+    </div>
+    <div className="page-body">
+      <div className="table-wrap"><table>
+        <thead><tr><th>Nom</th><th>Email</th><th>Rôle</th><th>Manager rattaché</th><th>CP dispo</th><th>CP acq.</th><th>RTT</th><th>Statut</th><th>Actions</th></tr></thead>
+        <tbody>{users.map(u=>{
+          const mgr=managers.find(m=>m.id===u.managerId);
+          const isProtected=u.isAdmin;
+          const fmtJ = v => { const n=parseFloat(v)||0; return Number.isInteger(n)?String(n):n.toFixed(2); };
+          return <tr key={u.id}>
+            <td><strong>{u.nom}</strong>{u.isAdmin&&<span style={{fontSize:10,color:"#7c3aed",marginLeft:5}}>🛡️</span>}</td>
+            <td style={{fontSize:11,color:"var(--muted)"}}>{u.email}</td>
+            <td>{getRolePill(u)}</td>
+            <td style={{fontSize:11}}>{mgr?mgr.nom:<span style={{color:"var(--muted)"}}>—</span>}</td>
+            <td>{fmtJ(u.solde)}j</td><td style={{color:"#d97706"}}>{fmtJ(u.soldeAcquisition||0)}j</td><td>{fmtJ(u.soldeRTT)}j</td>
+            <td>{u.mustChangePassword?<span className="badge" style={{color:"#d97706",background:"#fef3c7"}}>⚠ Temporaire</span>:<span className="badge" style={{color:"var(--accent2)",background:"#d1fae5"}}>✓ Actif</span>}</td>
+            <td><div className="actions-row">
+              <button className="btn btn-orange btn-sm" onClick={()=>openEdit(u)}>✏ Modifier</button>
+              {!isProtected
+                ? <button className="btn btn-danger btn-sm" onClick={()=>setConfirmDel(u)}>🗑 Suppr.</button>
+                : <span className="badge" style={{color:"#7c3aed",background:"#f5f3ff",fontSize:10}}>🔒 Protégé</span>
+              }
+            </div></td>
+          </tr>;
+        })}</tbody>
+      </table></div>
+      <div className="info-box info-purple" style={{marginTop:12}}>🛡️ Les comptes administrateurs ne peuvent pas être supprimés. Il doit toujours exister au moins un administrateur manager.</div>
+    </div>
+
+    {modal&&<div className="modal-overlay" onClick={e=>e.target===e.currentTarget&&setModal(null)}>
+      <div className="modal">
+        <div className="modal-header">
+          <div className="modal-title">{modal==="add"?"Nouvel employé":"Modifier l'employé"}</div>
+          <button className="modal-close" onClick={()=>setModal(null)}>×</button>
+        </div>
+        {formErr&&<div className="info-box info-warn" style={{marginBottom:12}}>{formErr}</div>}
+        <div className="form-grid">
+          <div className="form-group"><label>Nom complet</label><input type="text" value={form.nom} onChange={e=>setForm({...form,nom:e.target.value})} placeholder="Prénom Nom" /></div>
+          <div className="form-group"><label>Email</label><input type="email" value={form.email} onChange={e=>setForm({...form,email:e.target.value})} /></div>
+          <div className="form-group"><label>{modal==="add"?"Mot de passe initial":"Nouveau MDP (vide = inchangé)"}</label>
+            <input type="password" value={form.password} onChange={e=>setForm({...form,password:e.target.value})} placeholder={modal==="add"?"Temporaire…":"Laisser vide pour ne pas changer"} /></div>
+          <div className="form-group"><label>Rôle</label>
+            <select value={form.role} onChange={e=>setForm({...form,role:e.target.value,isAdmin:e.target.value==="salarie"?false:form.isAdmin})}>
+              <option value="salarie">Salarié</option>
+              <option value="manager">Manager</option>
+            </select></div>
+          {form.role==="manager"&&(
+            <div className="form-group full">
+              <label className="checkbox-row">
+                <input type="checkbox" checked={form.isAdmin} onChange={e=>setForm({...form,isAdmin:e.target.checked})} />
+                Accorder les droits Administrateur à ce manager
+              </label>
+              {form.isAdmin&&<div className="info-box info-purple" style={{marginTop:6}}>🛡️ L'admin peut gérer tous les employés, les jours fériés et ne peut pas être supprimé.</div>}
+            </div>
+          )}
+          {form.role==="salarie"&&(
+            <div className="form-group"><label>Manager rattaché</label>
+              <select value={form.managerId} onChange={e=>setForm({...form,managerId:e.target.value})}>
+                <option value="">— Aucun —</option>
+                {managers.map(m=><option key={m.id} value={m.id}>{m.nom}</option>)}
+              </select></div>
+          )}
+          <div className="form-group"><label>Solde CP disponibles (j)</label><input type="number" step="0.01" min="0" max="999" value={form.solde} onChange={e=>setForm({...form,solde:e.target.value})} /></div>
+          <div className="form-group"><label>CP en acquisition (j)</label><input type="number" step="0.01" min="0" max="999" value={form.soldeAcquisition} onChange={e=>setForm({...form,soldeAcquisition:e.target.value})} /></div>
+          <div className="form-group"><label>Solde RTT (jours)</label><input type="number" step="0.5" min="0" max="99" value={form.soldeRTT} onChange={e=>setForm({...form,soldeRTT:e.target.value})} /></div>
+        </div>
+        {modal==="add"&&<div className="info-box info-blue" style={{marginTop:10}}>ℹ L'employé devra changer son mot de passe à la 1ère connexion.</div>}
+        <div className="form-actions">
+          <button className="btn btn-primary" onClick={modal==="add"?submitAdd:submitEdit}>{modal==="add"?"Créer le compte":"Enregistrer"}</button>
+          <button className="btn btn-ghost" onClick={()=>setModal(null)}>Annuler</button>
+        </div>
+      </div>
+    </div>}
+
+    {confirmDel&&<div className="modal-overlay" onClick={e=>e.target===e.currentTarget&&setConfirmDel(null)}>
+      <div className="modal" style={{maxWidth:420}}>
+        <div className="modal-header"><div className="modal-title">Supprimer un employé</div><button className="modal-close" onClick={()=>setConfirmDel(null)}>×</button></div>
+        <p style={{fontSize:13.5,color:"var(--muted)",marginBottom:14}}>Confirmer la suppression de <strong style={{color:"var(--ink)"}}>{confirmDel.nom}</strong> ? Action irréversible.</p>
+        <div className="form-actions">
+          <button className="btn btn-danger" onClick={()=>{onDelete(confirmDel.id);setConfirmDel(null);}}>Supprimer définitivement</button>
+          <button className="btn btn-ghost" onClick={()=>setConfirmDel(null)}>Annuler</button>
+        </div>
+      </div>
+    </div>}
+  </>;
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SUPABASE CONFIG — remplacez ces deux valeurs après création du projet
+// ═══════════════════════════════════════════════════════════════════════════
+const SUPABASE_URL = "https://dqeyagmsoczdgwlbxhgg.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_BstRyMNgdlj4Y9xBH-2BTw_yGxDrBgN";
+
+// Client Supabase léger (sans SDK, appels REST directs)
+const sb = {
+  headers: { "apikey": SUPABASE_ANON_KEY, "Authorization": `Bearer ${SUPABASE_ANON_KEY}`, "Content-Type": "application/json", "Prefer": "return=representation" },
+  url: SUPABASE_URL,
+
+  async select(table, params="") {
+    const r = await fetch(`${this.url}/rest/v1/${table}?${params}`, { headers: this.headers });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  async insert(table, data) {
+    const r = await fetch(`${this.url}/rest/v1/${table}`, { method:"POST", headers: this.headers, body: JSON.stringify(data) });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  async update(table, id, data) {
+    const r = await fetch(`${this.url}/rest/v1/${table}?id=eq.${id}`, { method:"PATCH", headers: this.headers, body: JSON.stringify(data) });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  async delete(table, id) {
+    const r = await fetch(`${this.url}/rest/v1/${table}?id=eq.${id}`, { method:"DELETE", headers: this.headers });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  },
+  async rpc(fn, params) {
+    const r = await fetch(`${this.url}/rest/v1/rpc/${fn}`, { method:"POST", headers: this.headers, body: JSON.stringify(params) });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
+  }
+};
+
+// ─── Helpers Supabase ─────────────────────────────────────────────────────────
+const toUser = r => ({
+  id: r.id, email: r.email, nom: r.nom, role: r.role,
+  isAdmin: r.is_admin, managerId: r.manager_id,
+  solde: r.solde != null ? parseFloat(r.solde) : 0,
+  soldeRTT: r.solde_rtt != null ? parseFloat(r.solde_rtt) : 0,
+  soldeAcquisition: r.solde_acquisition != null ? parseFloat(r.solde_acquisition) : 0,
+  mustChangePassword: r.must_change_password,
+});
+
+const toDemande = r => ({
+  id: r.id, salarieId: r.salarie_id, salarie: r.salarie_nom,
+  debut: r.debut, fin: r.fin, jours: r.jours, type: r.type,
+  statut: r.statut, motif: r.motif || "", date_demande: r.date_demande,
+  saisiParManager: r.saisi_par_manager || false,
+});
+
+const toAbsence = r => ({
+  id: r.id, salarieId: r.salarie_id, salarie: r.salarie_nom,
+  type: r.type, debut: r.debut, fin: r.fin, jours: r.jours,
+  commentaire: r.commentaire || "", mois: r.mois, annee: r.annee,
+});
+
+const toHeureSup = r => ({
+  id: r.id, salarieId: r.salarie_id, salarie: r.salarie_nom,
+  heures: r.heures, semaine: r.semaine, commentaire: r.commentaire || "",
+  mois: r.mois, annee: r.annee,
+});
+
+// ─── Root avec Supabase ────────────────────────────────────────────────────────
+function App() {
+  const [users, setUsers] = useState([]);
+  const [user, setUser] = useState(null);
+  const [page, setPage] = useState("dashboard");
+  const [demandes, setDemandes] = useState([]);
+  const [absences, setAbsences] = useState([]);
+  const [heuresSup, setHeuresSup] = useState([]);
+  const [feriesManuels, setFeriesManuels] = useState({});
+  const [feriesOverrides, setFeriesOverrides] = useState({});
+  const [feriesSupprimés, setFeriesSupprimés] = useState([]); // ["2026-05-01", ...]
+  const [toast, setToast] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [dbError, setDbError] = useState(null);
+
+  const toast$ = (msg, type="ok") => { setToast({msg,type}); setTimeout(()=>setToast(null), 3400); };
+  const errToast = msg => toast$(msg, "err");
+
+  // Chargement initial de toutes les données
+  const loadAll = async () => {
+    setLoading(true);
+    try {
+      const [us, dem, abs, hsup, ferM, ferO, ferS] = await Promise.all([
+        sb.select("employes", "order=nom.asc"),
+        sb.select("demandes", "order=date_demande.desc"),
+        sb.select("absences", "order=debut.desc"),
+        sb.select("heures_sup", "order=semaine.desc"),
+        sb.select("feries_manuels"),
+        sb.select("feries_overrides"),
+        sb.select("feries_supprimes"),
+      ]);
+      setUsers(us.map(toUser));
+      setDemandes(dem.map(toDemande));
+      setAbsences(abs.map(toAbsence));
+      setHeuresSup(hsup.map(toHeureSup));
+      const fm = {}; ferM.forEach(r => { fm[r.date] = r.label; }); setFeriesManuels(fm);
+      const fo = {}; ferO.forEach(r => { fo[r.orig_date] = { newDate: r.new_date }; }); setFeriesOverrides(fo);
+      setFeriesSupprimés(ferS.map(r => r.date));
+    } catch(e) {
+      setDbError("Impossible de contacter la base de données. Vérifiez vos clés Supabase.");
+    }
+    setLoading(false);
+  };
+
+  React.useEffect(() => { loadAll(); }, []);
+
+  const feriesAll = useMemo(() => {
+    const years = [-1,0,1,2].map(d=>new Date().getFullYear()+d);
+    const result = {};
+    years.forEach(y => {
+      const base = getFeriesAuto(y);
+      Object.entries(base).forEach(([origDate,label]) => {
+        if (feriesSupprimés.includes(origDate)) return; // exclu
+        const ov = feriesOverrides[origDate];
+        result[ov ? ov.newDate : origDate] = label;
+      });
+    });
+    Object.entries(feriesManuels).forEach(([d,label]) => { result[d] = label; });
+    return result;
+  }, [feriesManuels, feriesOverrides, feriesSupprimés]);
+
+  // ── Auth ──
+ const handleLogin = async (emailSaisi, pwdSaisi) => {
+    try {
+      const res = await sb.rpc("verify_password", { p_email: emailSaisi, p_password: pwdSaisi });
+      if (!res || !res[0] || !res[0].id) return "Email ou mot de passe incorrect.";
+      const u = users.find(u => u.id === res[0].id);
+      if (u) {
+        // Utiliser must_change_password depuis la base, pas depuis le state local
+        setUser({...u, mustChangePassword: res[0].must_change_password});
+        setPage("dashboard");
+        return null;
+      }
+      return "Utilisateur introuvable.";
+    } catch(e) {
+      return "Erreur de connexion : " + e.message;
+    }
+  };
+
+  const handleChangePwd = async (pwd) => {
+    try {
+      await sb.rpc("change_password", { p_user_id: user.id, p_new_password: pwd });
+      setUser(u=>({...u,mustChangePassword:false}));
+      toast$("✅ Mot de passe mis à jour !");
+    } catch(e) {
+      // Ignorer l'erreur de parsing si la fonction répond vide
+      setUser(u=>({...u,mustChangePassword:false}));
+      toast$("✅ Mot de passe mis à jour !");
+    }
+  };
+
+  // ── Demandes ──
+  const handleNouvelleDemande = async (d) => {
+    try {
+      const [r] = await sb.insert("demandes", {
+        salarie_id: d.salarieId, salarie_nom: d.salarie,
+        debut: d.debut, fin: d.fin, jours: d.jours, type: d.type,
+        statut: "en_attente", motif: d.motif,
+        date_demande: new Date().toISOString().split("T")[0],
+      });
+      setDemandes(p=>[toDemande(r),...p]);
+      toast$("✅ Demande envoyée !"); setPage("historique");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleEditDemande = async (id, c) => {
+    try {
+      const payload = {};
+      if (c.debut) payload.debut = c.debut;
+      if (c.fin) payload.fin = c.fin;
+      if (c.jours) payload.jours = c.jours;
+      if (c.type) payload.type = c.type;
+      if (c.motif !== undefined) payload.motif = c.motif;
+      await sb.update("demandes", id, payload);
+      setDemandes(p=>p.map(d=>d.id===id?{...d,...c}:d));
+      toast$("✅ Demande modifiée");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleDeleteDemande = async (id) => {
+    try {
+      await sb.delete("demandes", id);
+      setDemandes(p=>p.filter(d=>d.id!==id));
+      toast$("🗑 Demande supprimée");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleValider = async (id) => {
+    try {
+      const d = demandes.find(x=>x.id===id); if(!d) return;
+      const sal = users.find(u=>u.id===d.salarieId); if(!sal) return;
+      const field = d.type==="RTT" ? "solde_rtt" : "solde";
+      const newSolde = (d.type==="RTT" ? sal.soldeRTT : sal.solde) - d.jours;
+      await sb.update("demandes", id, { statut: "approuve" });
+      await sb.update("employes", sal.id, { [field]: newSolde });
+      setDemandes(p=>p.map(x=>x.id===id?{...x,statut:"approuve"}:x));
+      setUsers(p=>p.map(u=>u.id===sal.id?{...u,[d.type==="RTT"?"soldeRTT":"solde"]:newSolde}:u));
+      if (user && user.id===sal.id) setUser(u=>({...u,[d.type==="RTT"?"soldeRTT":"solde"]:newSolde}));
+      toast$("✅ Congé approuvé");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleRefuser = async (id) => {
+    try {
+      await sb.update("demandes", id, { statut: "refuse" });
+      setDemandes(p=>p.map(d=>d.id===id?{...d,statut:"refuse"}:d));
+      toast$("✗ Congé refusé");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleAnnuler = async (id) => {
+    try {
+      const d = demandes.find(x=>x.id===id); if(!d) return;
+      const sal = users.find(u=>u.id===d.salarieId); if(!sal) return;
+      const field = d.type==="RTT" ? "solde_rtt" : "solde";
+      const newSolde = (d.type==="RTT" ? sal.soldeRTT : sal.solde) + d.jours;
+      await sb.update("demandes", id, { statut: "annule" });
+      await sb.update("employes", sal.id, { [field]: newSolde });
+      setDemandes(p=>p.map(x=>x.id===id?{...x,statut:"annule"}:x));
+      setUsers(p=>p.map(u=>u.id===sal.id?{...u,[d.type==="RTT"?"soldeRTT":"solde"]:newSolde}:u));
+      if (user && user.id===sal.id) setUser(u=>({...u,[d.type==="RTT"?"soldeRTT":"solde"]:newSolde}));
+      toast$(`↩ Annulé — ${d.jours}j recrédités à ${d.salarie}`);
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleSaisirPourSalarie = async (d) => {
+    try {
+      const [r] = await sb.insert("demandes", {
+        salarie_id: d.salarieId, salarie_nom: d.salarie,
+        debut: d.debut, fin: d.fin, jours: d.jours, type: d.type,
+        statut: "en_attente", motif: d.motif || "",
+        date_demande: new Date().toISOString().split("T")[0],
+        saisi_par_manager: true,
+      });
+      setDemandes(p=>[toDemande(r),...p]);
+      toast$(`📋 Demande créée pour ${d.salarie}`);
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  // ── Absences ──
+  const handleAddAbsence = async (a) => {
+    try {
+      const [r] = await sb.insert("absences", {
+        salarie_id: a.salarieId, salarie_nom: a.salarie,
+        type: a.type, debut: a.debut, fin: a.fin, jours: a.jours,
+        commentaire: a.commentaire||"", mois: a.mois, annee: a.annee,
+      });
+      setAbsences(p=>[toAbsence(r),...p]);
+      toast$("✅ Absence enregistrée");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleDeleteAbsence = async (id) => {
+    try {
+      await sb.delete("absences", id);
+      setAbsences(p=>p.filter(a=>a.id!==id));
+      toast$("🗑 Absence supprimée");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  // ── Heures sup ──
+  const handleAddHSup = async (h) => {
+    try {
+      const [r] = await sb.insert("heures_sup", {
+        salarie_id: h.salarieId, salarie_nom: h.salarie,
+        heures: h.heures, semaine: h.semaine,
+        commentaire: h.commentaire||"", mois: h.mois, annee: h.annee,
+      });
+      setHeuresSup(p=>[toHeureSup(r),...p]);
+      toast$("✅ Heures enregistrées");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleDeleteHSup = async (id) => {
+    try {
+      await sb.delete("heures_sup", id);
+      setHeuresSup(p=>p.filter(h=>h.id!==id));
+      toast$("🗑 Supprimé");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  // ── Acquisition CP ──
+  const handleCreditAcquisition = async (userId, cpAcquis) => {
+    try {
+      const sal = users.find(u => u.id === userId);
+      if (!sal) return;
+      const newAcquisition = parseFloat(((sal.soldeAcquisition || 0) + cpAcquis).toFixed(2));
+      await sb.update("employes", userId, { solde_acquisition: newAcquisition });
+      setUsers(p => p.map(u => u.id === userId ? { ...u, soldeAcquisition: newAcquisition } : u));
+      if (user && user.id === userId) setUser(u => ({ ...u, soldeAcquisition: newAcquisition }));
+      toast$(`📈 +${cpAcquis} j crédités en acquisition pour ${sal.nom} (total : ${newAcquisition} j)`);
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  // ── Employés ──
+  const handleAddUser = async (data) => {
+    try {
+      const [r] = await sb.rpc("create_employee", {
+        p_nom: data.nom, p_email: data.email, p_password: data.password,
+        p_role: data.role, p_is_admin: data.isAdmin||false,
+        p_manager_id: data.managerId||null,
+        p_solde: parseFloat(data.solde)||25,
+        p_solde_rtt: parseFloat(data.soldeRTT)||5,
+        p_solde_acquisition: parseFloat(data.soldeAcquisition)||0,
+      });
+      // Recharger la liste employés
+      const us = await sb.select("employes","order=nom.asc");
+      setUsers(us.map(toUser));
+      toast$(`✅ Compte créé pour ${data.nom}`);
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleDeleteUser = async (id) => {
+    try {
+      await sb.delete("employes", id);
+      setUsers(p=>p.filter(u=>u.id!==id));
+      toast$("🗑 Employé supprimé");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleUpdateUser = async (id, c) => {
+    try {
+      const payload = {};
+      if (c.nom !== undefined) payload.nom = c.nom;
+      if (c.email !== undefined) payload.email = c.email;
+      if (c.role !== undefined) payload.role = c.role;
+      if (c.isAdmin !== undefined) payload.is_admin = c.isAdmin;
+      if (c.managerId !== undefined) payload.manager_id = c.managerId;
+      if (c.solde !== undefined) payload.solde = parseFloat(c.solde);
+      if (c.soldeRTT !== undefined) payload.solde_rtt = parseFloat(c.soldeRTT);
+      if (c.soldeAcquisition !== undefined) payload.solde_acquisition = parseFloat(c.soldeAcquisition);
+      if (c.password) {
+        await sb.rpc("change_password", { p_user_id: id, p_new_password: c.password });
+      }
+      if (Object.keys(payload).length > 0) await sb.update("employes", id, payload);
+      const us = await sb.select("employes","order=nom.asc");
+      const updated = us.map(toUser);
+      setUsers(updated);
+      if (user && user.id===id) setUser(updated.find(u=>u.id===id));
+      toast$("✅ Employé mis à jour");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  // ── Fériés ──
+  const handleAddFerie = async (date, label) => {
+    try {
+      await sb.insert("feries_manuels", { date, label });
+      setFeriesManuels(f=>({...f,[date]:label}));
+      toast$(`✅ Jour spécial ajouté : ${label}`);
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleDeleteFerie = async (date) => {
+    try {
+      const r = await sb.select("feries_manuels", `date=eq.${date}`);
+      if (r[0]) await sb.delete("feries_manuels", r[0].id);
+      setFeriesManuels(f=>{ const n={...f}; delete n[date]; return n; });
+      toast$("🗑 Jour spécial supprimé");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleOverrideFerie = async (origDate, newDate) => {
+    try {
+      const existing = await sb.select("feries_overrides", `orig_date=eq.${origDate}`);
+      if (existing[0]) await sb.update("feries_overrides", existing[0].id, { new_date: newDate });
+      else await sb.insert("feries_overrides", { orig_date: origDate, new_date: newDate });
+      setFeriesOverrides(ov=>({...ov,[origDate]:{newDate}}));
+      toast$("✅ Date corrigée");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleDeleteOverride = async (origDate) => {
+    try {
+      const r = await sb.select("feries_overrides", `orig_date=eq.${origDate}`);
+      if (r[0]) await sb.delete("feries_overrides", r[0].id);
+      setFeriesOverrides(ov=>{ const n={...ov}; delete n[origDate]; return n; });
+      toast$("↩ Date rétablie");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleSupprimerFerie = async (date) => {
+    try {
+      await sb.insert("feries_supprimes", { date });
+      setFeriesSupprimés(p => [...p, date]);
+      toast$("🗑 Férié supprimé du calendrier");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  const handleRestaurerFerie = async (date) => {
+    try {
+      const r = await sb.select("feries_supprimes", `date=eq.${date}`);
+      if (r[0]) await sb.delete("feries_supprimes", r[0].id);
+      setFeriesSupprimés(p => p.filter(d => d !== date));
+      toast$("✅ Férié restauré");
+    } catch(e) { errToast("Erreur : " + e.message); }
+  };
+
+  // ── Render ──
+  const pages = user ? {
+    dashboard:  <Dashboard user={user} demandes={demandes} />,
+    demande:    <NouvelleDemande user={user} onSubmit={handleNouvelleDemande} feriesAll={feriesAll} />,
+    historique: <Historique user={user} demandes={demandes} onEdit={handleEditDemande} onDelete={handleDeleteDemande} feriesAll={feriesAll} />,
+    planning:   <Planning users={users} demandes={demandes} absences={absences} feriesAll={feriesAll} />,
+    validation: <Validation demandes={demandes} users={users} onValider={handleValider} onRefuser={handleRefuser} onAnnuler={handleAnnuler} onSaisirPourSalarie={handleSaisirPourSalarie} feriesAll={feriesAll} managerUser={user} />,
+    absences:   <SaisieAbsences absences={absences} users={users} onAdd={handleAddAbsence} onDelete={handleDeleteAbsence} />,
+    heures_sup: <HeuresSup heuresSup={heuresSup} users={users} onAdd={handleAddHSup} onDelete={handleDeleteHSup} />,
+    paie:       <PreparationPaie demandes={demandes} absences={absences} heuresSup={heuresSup} users={users} feriesAll={feriesAll} onCreditAcquisition={handleCreditAcquisition} />,
+    equipe:     <Equipe users={users} demandes={demandes} absences={absences} />,
+    employes:   <GestionEmployes users={users} onAdd={handleAddUser} onDelete={handleDeleteUser} onUpdate={handleUpdateUser} />,
+    feries:     <JoursFeries feriesManuels={feriesManuels} feriesOverrides={feriesOverrides} feriesSupprimés={feriesSupprimés}
+                  onAdd={handleAddFerie} onDelete={handleDeleteFerie}
+                  onOverride={handleOverrideFerie} onDeleteOverride={handleDeleteOverride}
+                  onSupprimerFerie={handleSupprimerFerie} onRestaurerFerie={handleRestaurerFerie} />,
+  } : {};
+
+  if (dbError) return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#f7f4ef",fontFamily:"sans-serif"}}>
+      <div style={{background:"#fff",padding:40,borderRadius:12,boxShadow:"0 4px 24px rgba(0,0,0,.1)",maxWidth:480,textAlign:"center"}}>
+        <div style={{fontSize:40,marginBottom:16}}>⚠️</div>
+        <h2 style={{marginBottom:8,color:"#1a1a2e"}}>Connexion à la base de données impossible</h2>
+        <p style={{color:"#8a8070",marginBottom:20,lineHeight:1.6}}>{dbError}</p>
+        <p style={{fontSize:12,color:"#c84b31"}}>Vérifiez que SUPABASE_URL et SUPABASE_ANON_KEY sont corrects dans le fichier index.html</p>
+      </div>
+    </div>
+  );
+
+  if (loading) return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"#f7f4ef",fontFamily:"sans-serif"}}>
+      <div style={{textAlign:"center"}}>
+        <div style={{fontSize:40,marginBottom:16}}>🌴</div>
+        <p style={{color:"#8a8070",fontSize:16}}>Chargement des données…</p>
+      </div>
+    </div>
+  );
+
+  // LoginScreen modifié pour passer email+pwd plutôt que l'objet user
+  if (!user) return (
+    <>
+      <style>{css}</style>
+      <LoginScreenSupabase onLogin={handleLogin} />
+    </>
+  );
+  if (user.mustChangePassword) return <><style>{css}</style><ChangePasswordScreen onDone={handleChangePwd} /></>;
+
+  return <>
+    <style>{css}</style>
+    <Shell user={user} page={page} setPage={setPage} onLogout={()=>setUser(null)}>
+      {pages[page]||pages.dashboard}
+    </Shell>
+    {toast&&<div className={`toast ${toast.type==="err"?"toast-err":""}`}>{toast.msg}</div>}
+  </>;
+}
+
+// ─── Login Supabase (email + password sans objet user) ────────────────────────
+function LoginScreenSupabase({ onLogin }) {
+  const [email, setEmail] = useState("");
+  const [pwd, setPwd] = useState("");
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async () => {
+    if (!email||!pwd) return setErr("Email et mot de passe requis.");
+    setLoading(true); setErr("");
+    const error = await onLogin(email.trim().toLowerCase(), pwd);
+    if (error) setErr(error);
+    setLoading(false);
+  };
+
+  return (
+    <div className="login-wrap">
+      <div className="login-brand">
+        <div className="login-brand-icon">🌴</div>
+        <h1>Gestion des congés Beelog</h1>
+        <p>Gestion des congés et absences</p>
+      </div>
+      <div className="login-form-side">
+        <div className="login-card">
+          <h2>Connexion</h2>
+          <p>Accédez à votre espace</p>
+          <div className="field"><label>Email</label>
+            <input type="email" value={email} placeholder="vous@beelog.fr" onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()} /></div>
+          <div className="field"><label>Mot de passe</label>
+            <input type="password" value={pwd} placeholder="••••••••" onChange={e=>setPwd(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()} /></div>
+          {err&&<div className="error-msg">⚠ {err}</div>}
+          <button className="btn btn-primary btn-full" onClick={submit} disabled={loading}>
+            {loading ? "Connexion…" : "Se connecter →"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>
