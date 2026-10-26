@@ -1,0 +1,29 @@
+name: Keep repo active
+
+# Fait un petit commit automatique une fois par mois pour que GitHub
+# ne considère pas le dépôt comme inactif (sinon les workflows planifiés,
+# dont "Keep Supabase alive", sont désactivés après 60 jours sans commit).
+
+on:
+  schedule:
+    - cron: '17 6 1 * *'   # le 1er de chaque mois, 6h17 UTC
+  workflow_dispatch:        # permet aussi un lancement manuel depuis l'onglet Actions
+
+permissions:
+  contents: write           # nécessaire pour pousser le commit
+
+jobs:
+  commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@v4
+
+      - name: Mettre à jour le fichier d'activité et committer
+        run: |
+          date -u +"%Y-%m-%d %H:%M:%S UTC" > .github/last-activity.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/last-activity.txt
+          git commit -m "chore: activité mensuelle automatique [skip ci]"
+          git push
